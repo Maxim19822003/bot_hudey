@@ -9,7 +9,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 # ========= ENV =========
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 SHEET_ID = os.environ["SHEET_ID"]
-GOOGLE_CREDS_JSON = os.environ["GOOGLE_CREDS_JSON"]  # JSON целиком одной строкой
+GOOGLE_CREDS_JSON = os.environ["GOOGLE_CREDS_JSON"]
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
@@ -19,7 +19,6 @@ app = Flask(__name__)
 # ========= Google Sheets =========
 def get_sheet():
     creds_dict = json.loads(GOOGLE_CREDS_JSON)
-
     scope = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
@@ -29,42 +28,61 @@ def get_sheet():
     return client.open_by_key(SHEET_ID)
 
 def ensure_headers(sh):
-    # Создаёт листы/заголовки, если их нет (удобно, чтобы не ошибиться)
     required = {
         "users": ["user_id","first_name","timezone","created_at"],
         "meals": ["ts","user_id","meal_type","text","photo_file_id","photo_url","kcal_avg","confidence","notes"],
         "daily_log": ["date","user_id","weight_kg","steps","workout","water_ml","sleep_h","comment","updated_at"],
     }
+
     existing_titles = [ws.title for ws in sh.worksheets()]
 
     for title, headers in required.items():
         if title not in existing_titles:
-            ws = sh.add_worksheet(title=title, rows=1000, cols=len(headers) + 5)
+            ws = sh.add_worksheet(title=title, rows=1000, cols=20)
             ws.append_row(headers)
         else:
             ws = sh.worksheet(title)
-            row1 = ws.row_values(1)
-            if row1 != headers:
-                # если пусто/не совпадает — ставим как надо
-                if not row1:
-                    ws.append_row(headers)
-                else:
-                    ws.delete_rows(1)
-                    ws.insert_row(headers, 1)
+            if ws.row_values(1) != headers:
+                ws.delete_rows(1)
+                ws.insert_row(headers, 1)
 
 # ========= Telegram helpers =========
-def tg_send(chat_id: int, text: str):
-    requests.post(f"{TELEGRAM_API}/sendMessage", json={"chat_id": chat_id, "text": text})
+def tg_send(chat_id: int, text: str, reply_markup=None):
+    payload = {"chat_id": chat_id, "text": text}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    requests.post(f"{TELEGRAM_API}/sendMessage", json=payload)
+
+def tg_send_video(chat_id: int, caption: str, reply_markup=None):
+    with open("gipsy.mp4", "rb") as video:
+        files = {"video": video}
+        data = {"chat_id": chat_id, "caption": caption}
+        if reply_markup:
+            data["reply_markup"] = json.dumps(reply_markup)
+        requests.post(f"{TELEGRAM_API}/sendVideo", data=data, files=files)
 
 def tg_get_file_url(file_id: str) -> str:
     r = requests.get(f"{TELEGRAM_API}/getFile", params={"file_id": file_id}).json()
     file_path = r["result"]["file_path"]
     return f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
 
-# ========= MVP calorie estimator (заглушка) =========
-def estimate_kcal_avg(photo_url: str) -> tuple[int, float, str]:
-    # Пока без реального распознавания: средняя оценка “по умолчанию”
-    # Потом заменим на AI по фото.
+def main_menu():
+    return {
+        "inline_keyboard": [
+            [{"text": "🔥 НАЧАТЬ", "callback_data": "begin"}],
+            [
+                {"text": "⚖️ Вес", "callback_data": "weight"},
+                {"text": "📸 Еда", "callback_data": "meal"}
+            ],
+            [
+                {"text": "🚶 Шаги", "callback_data": "steps"},
+                {"text": "📊 Итог дня", "callback_data": "summary"}
+            ]
+        ]
+    }
+
+# ========= Calorie Estimator =========
+def estimate_kcal_avg(photo_url: str):
     return 600, 0.35, "MVP: без распознавания (заглушка)"
 
 # ========= Routes =========
@@ -79,6 +97,25 @@ def webhook():
             return "Forbidden", 403
 
     update = request.get_json(force=True)
+
+    # Обработка кнопок
+    if "callback_query" in update:
+        query = update["callback_query"]
+        chat_id = query["message"]["chat"]["id"]
+        data = query["data"]
+
+        if data == "begin":
+            tg_send(chat_id, "Сделка принята. Начинаем с цифр.\nПришли вес.")
+        elif data == "weight":
+            tg_send(chat_id, "Введи текущий вес (кг).")
+        elif data == "meal":
+            tg_send(chat_id, "Пришли фото еды.")
+        elif data == "steps":
+            tg_send(chat_id, "Сколько шагов сегодня?")
+        elif data == "summary":
+            tg_send(chat_id, "Итог дня скоро будет здесь.")
+        return "OK", 200
+
     msg = update.get("message")
     if not msg:
         return "OK", 200
@@ -90,7 +127,6 @@ def webhook():
 
     sh = get_sheet()
     ensure_headers(sh)
-
     ws_users = sh.worksheet("users")
     ws_meals = sh.worksheet("meals")
 
@@ -101,7 +137,12 @@ def webhook():
         existing_ids = ws_users.col_values(1)
         if user_id not in existing_ids:
             ws_users.append_row([user_id, first_name, "Europe/Amsterdam", datetime.utcnow().isoformat()])
-        tg_send(chat_id, "БОТ ХУДЕЙ 🕯️\nКидай фото еды — я запишу и дам среднюю оценку калорий.")
+
+        tg_send_video(
+            chat_id,
+            "БОТ ХУДЕЙ 🕯️\nСделка принята.\nДальше — цифры.",
+            reply_markup=main_menu()
+        )
         return "OK", 200
 
     # Фото еды
@@ -111,20 +152,22 @@ def webhook():
         photo_url = tg_get_file_url(file_id)
 
         kcal_avg, conf, notes = estimate_kcal_avg(photo_url)
-
         ts = datetime.now(timezone.utc).isoformat()
+
         ws_meals.append_row([
-            ts, user_id, "", "", file_id, photo_url, str(kcal_avg), str(conf), notes
+            ts, user_id, "", "", file_id, photo_url,
+            str(kcal_avg), str(conf), notes
         ])
 
-        tg_send(chat_id, f"Записал ✅\nПо фото в среднем: ~{kcal_avg} ккал.")
+        tg_send(chat_id, f"Записал ✅\nПо фото в среднем: ~{kcal_avg} ккал.", reply_markup=main_menu())
         return "OK", 200
 
-    # Любой текст
-    if text:
-        tg_send(chat_id, "Понял. Для MVP: отправь фото еды или /start.")
+    # Вес (просто число)
+    if text and text.replace(".", "", 1).isdigit():
+        tg_send(chat_id, f"Вес {text} кг записан.", reply_markup=main_menu())
         return "OK", 200
 
+    tg_send(chat_id, "Выбери действие ниже.", reply_markup=main_menu())
     return "OK", 200
 
 
