@@ -1,5 +1,9 @@
-const tg = window.Telegram.WebApp;
-tg.expand();
+const tg = window.Telegram?.WebApp;
+
+if (tg){
+  tg.ready();
+  tg.expand();
+}
 
 const s0 = document.getElementById("s0");
 const s1 = document.getElementById("s1");
@@ -10,8 +14,14 @@ const leftEl = document.getElementById("left");
 const stepsEl = document.getElementById("steps");
 
 function uid() {
-  // Telegram WebApp user id доступен в initDataUnsafe
-  return tg.initDataUnsafe?.user?.id ? String(tg.initDataUnsafe.user.id) : "";
+  return tg?.initDataUnsafe?.user?.id ? String(tg.initDataUnsafe.user.id) : "";
+}
+
+function valOrPlaceholder(id){
+  const el = document.getElementById(id);
+  const v = (el.value || "").trim();
+  if (v) return v;
+  return (el.placeholder || "").trim();
 }
 
 async function refreshToday() {
@@ -36,38 +46,55 @@ document.getElementById("back").onclick = () => {
 };
 
 document.getElementById("save").onclick = () => {
+  if (!tg){
+    alert("Открой мини-приложение из Telegram-кнопки бота.");
+    return;
+  }
+
   const payload = {
     action: "profile_save",
-    timezone: "Europe/Moscow",
-    start_weight_kg: document.getElementById("w").value.trim(),
-    height_cm: document.getElementById("h").value.trim(),
-    age: document.getElementById("a").value.trim(),
-    goal_weight_kg: document.getElementById("gw").value.trim(),
-    goal_weeks: document.getElementById("weeks").value.trim(),
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/Moscow",
+
+    start_weight_kg: valOrPlaceholder("w"),
+    height_cm: valOrPlaceholder("h"),
+    age: valOrPlaceholder("a"),
+    goal_weight_kg: valOrPlaceholder("gw"),
+    goal_weeks: valOrPlaceholder("weeks"),
+
     activity_level: document.getElementById("act").value,
-    checkin_time: document.getElementById("cin").value.trim() || "08:05",
-    checkout_time: document.getElementById("cout").value.trim() || "22:30",
+    checkin_time: (valOrPlaceholder("cin") || "08:05"),
+    checkout_time: (valOrPlaceholder("cout") || "22:30"),
   };
+
+  // мини-валидация
+  if (!payload.start_weight_kg || !payload.height_cm || !payload.age || !payload.goal_weight_kg || !payload.goal_weeks){
+    alert("Заполни вес/рост/возраст/цель/срок.");
+    return;
+  }
 
   tg.sendData(JSON.stringify(payload));
 
+  // UI переключаем, но реальная запись — на стороне бота
   s1.classList.add("hidden");
   s2.classList.remove("hidden");
   refreshToday();
 };
 
 document.getElementById("meal").onclick = () => {
+  if (!tg) return;
   tg.sendData(JSON.stringify({ action: "meal_request" }));
-  tg.close(); // переводим в чат, где бот попросит фото/текст
+  tg.close();
 };
 
 document.getElementById("wbtn").onclick = () => {
+  if (!tg) return;
   const w = prompt("Вес утром (кг):", "");
   if (!w) return;
   tg.sendData(JSON.stringify({ action: "weight_morning", weight_morning_kg: w }));
 };
 
 document.getElementById("sbtn").onclick = () => {
+  if (!tg) return;
   const s = prompt("Шаги сегодня:", "");
   if (!s) return;
   tg.sendData(JSON.stringify({ action: "steps", steps: s }));
