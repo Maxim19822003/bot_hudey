@@ -1,4 +1,3 @@
-// web/app.js - полностью исправленный
 const tg = window.Telegram?.WebApp;
 
 if (tg) {
@@ -30,6 +29,21 @@ function valOrPlaceholder(id) {
   return (el.placeholder || "").trim();
 }
 
+async function checkUserExists() {
+  const id = uid();
+  if (!id) return false;
+  
+  try {
+    const res = await fetch(`/api/today?user_id=${encodeURIComponent(id)}`);
+    const j = await res.json();
+    // Если получили данные (даже с 0 калориями) — пользователь существует
+    return j.ok === true;
+  } catch (e) {
+    console.error("checkUserExists error:", e);
+    return false;
+  }
+}
+
 async function refreshToday() {
   const id = uid();
   if (!id) {
@@ -46,6 +60,26 @@ async function refreshToday() {
     stepsEl.textContent = `${j.steps}`;
   } catch (e) {
     console.error("refreshToday error:", e);
+  }
+}
+
+// Инициализация при загрузке
+async function init() {
+  const exists = await checkUserExists();
+  
+  if (exists) {
+    // Пользователь уже есть — показываем дашборд
+    console.log("User exists, showing dashboard");
+    s0.classList.add("hidden");
+    s1.classList.add("hidden");
+    s2.classList.remove("hidden");
+    await refreshToday();
+  } else {
+    // Новый пользователь — показываем приветствие
+    console.log("New user, showing welcome screen");
+    s0.classList.remove("hidden");
+    s1.classList.add("hidden");
+    s2.classList.add("hidden");
   }
 }
 
@@ -109,7 +143,7 @@ document.getElementById("save").onclick = async () => {
       return;
     }
 
-    // Переключаем UI
+    // Переключаем UI на дашборд
     s1.classList.add("hidden");
     s2.classList.remove("hidden");
 
@@ -136,7 +170,7 @@ document.getElementById("wbtn").onclick = () => {
   tg.close();
 };
 
-// Внести вес (вечер) - НОВАЯ КНОПКА
+// Внести вес (вечер)
 document.getElementById("wbtn_evening").onclick = () => {
   if (!tg) return;
   const w = prompt("Вес вечером (кг):", "");
@@ -154,7 +188,7 @@ document.getElementById("sbtn").onclick = () => {
   tg.close();
 };
 
-// История веса - НОВАЯ КНОПКА
+// История веса
 document.getElementById("history").onclick = async () => {
   const id = uid();
   if (!id) return;
@@ -165,7 +199,6 @@ document.getElementById("history").onclick = async () => {
       alert("Ошибка загрузки истории");
       return;
     }
-    // Показываем простым списком, позже график
     let msg = "📊 История веса:\n\n";
     j.data.forEach(row => {
       msg += `${row.date}: ${row.morning || "?"} → ${row.evening || "?"} кг\n`;
@@ -177,5 +210,5 @@ document.getElementById("history").onclick = async () => {
   }
 };
 
-// Инициализация
-refreshToday();
+// Запускаем инициализацию
+init();
