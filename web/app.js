@@ -18,6 +18,28 @@ function uid() {
 }
 
 function valOrPlaceholder(id){
+  const el = document.getElementById(idconst tg = window.Telegram?.WebApp;
+
+if (tg) {
+  tg.ready();
+  tg.expand();
+}
+
+const s0 = document.getElementById("s0");
+const s1 = document.getElementById("s1");
+const s2 = document.getElementById("s2");
+
+const eatenEl = document.getElementById("eaten");
+const leftEl = document.getElementById("left");
+const stepsEl = document.getElementById("steps");
+
+function uid() {
+  return tg?.initDataUnsafe?.user?.id ? String(tg.initDataUnsafe.user.id) : "";
+}
+function firstName(){
+  return tg?.initDataUnsafe?.user?.first_name ? String(tg.initDataUnsafe.user.first_name) : "";
+}
+function valOrPlaceholder(id){
   const el = document.getElementById(id);
   const v = (el.value || "").trim();
   if (v) return v;
@@ -45,39 +67,55 @@ document.getElementById("back").onclick = () => {
   s0.classList.remove("hidden");
 };
 
-document.getElementById("save").onclick = () => {
-  if (!tg){
+document.getElementById("save").onclick = async () => {
+  const id = uid();
+  if (!id) {
     alert("Открой мини-приложение из Telegram-кнопки бота.");
     return;
   }
 
   const payload = {
-    action: "profile_save",
-    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/Moscow",
+    user_id: id,
+    first_name: firstName(),
 
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/Moscow",
     start_weight_kg: valOrPlaceholder("w"),
     height_cm: valOrPlaceholder("h"),
     age: valOrPlaceholder("a"),
     goal_weight_kg: valOrPlaceholder("gw"),
     goal_weeks: valOrPlaceholder("weeks"),
-
     activity_level: document.getElementById("act").value,
     checkin_time: (valOrPlaceholder("cin") || "08:05"),
     checkout_time: (valOrPlaceholder("cout") || "22:30"),
   };
 
-  // мини-валидация
-  if (!payload.start_weight_kg || !payload.height_cm || !payload.age || !payload.goal_weight_kg || !payload.goal_weeks){
-    alert("Заполни вес/рост/возраст/цель/срок.");
+  // минимальная проверка
+  if (!payload.start_weight_kg || !payload.height_cm || !payload.age || !payload.goal_weight_kg || !payload.goal_weeks) {
+    alert("Заполни: вес / рост / возраст / цель / срок.");
     return;
   }
 
-  tg.sendData(JSON.stringify(payload));
+  // ВАЖНО: пишем напрямую в сервер -> таблица
+  const res = await fetch("/api/profile_save", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
 
-  // UI переключаем, но реальная запись — на стороне бота
+  const j = await res.json();
+  if (!j.ok) {
+    alert("Ошибка сохранения. Открой Render Logs.");
+    return;
+  }
+
+  // переключаем UI
   s1.classList.add("hidden");
   s2.classList.remove("hidden");
-  refreshToday();
+
+  await refreshToday();
+
+  // (опционально) маленький эффект “в Телегу” — если хочешь:
+  // tg.sendData(JSON.stringify({ action: "profile_saved_ping" }));
 };
 
 document.getElementById("meal").onclick = () => {
@@ -86,10 +124,13 @@ document.getElementById("meal").onclick = () => {
   tg.close();
 };
 
-document.getElementById("wbtn").onclick = () => {
-  if (!tg) return;
+document.getElementById("wbtn").onclick = async () => {
+  const id = uid();
+  if (!id) return;
   const w = prompt("Вес утром (кг):", "");
   if (!w) return;
+
+  // пока оставим через sendData как было (можно тоже перевести на API позже)
   tg.sendData(JSON.stringify({ action: "weight_morning", weight_morning_kg: w }));
 };
 
