@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Бот Худей</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <link rel="stylesheet" href="./style.css" />
@@ -17,57 +17,91 @@
     <div class="card" id="s0">
       <div class="h1">БОТ ХУДЕЙ</div>
       <div class="p">Старик уже рядом. Готов снять проклятие лишнего веса?</div>
-      <button class="btn" id="go">🔥 Снять проклятие</button>
+      <div class="actions">
+        <button class="btn" id="go">🔥 Снять проклятие</button>
+      </div>
     </div>
 
     <!-- экран 1 -->
     <div class="card hidden" id="s1">
       <div class="h1">Контракт</div>
 
-      <label>Вес (кг)</label>
-      <input id="w" inputmode="decimal" placeholder="105" />
+      <div class="field">
+        <label>Вес (кг)</label>
+        <input id="w" inputmode="decimal" placeholder="105" />
+      </div>
 
-      <label>Рост (см)</label>
-      <input id="h" inputmode="numeric" placeholder="182" />
+      <div class="field">
+        <label>Рост (см)</label>
+        <input id="h" inputmode="numeric" placeholder="182" />
+      </div>
 
-      <label>Возраст</label>
-      <input id="a" inputmode="numeric" placeholder="44" />
+      <div class="field">
+        <label>Возраст</label>
+        <input id="a" inputmode="numeric" placeholder="44" />
+      </div>
 
-      <label>Цель (кг)</label>
-      <input id="gw" inputmode="decimal" placeholder="85" />
+      <div class="field">
+        <label>Цель (кг)</label>
+        <input id="gw" inputmode="decimal" placeholder="85" />
+      </div>
 
-      <label>Срок (недель)</label>
-      <input id="weeks" inputmode="numeric" placeholder="9" />
+      <div class="field">
+        <label>Срок (недель)</label>
+        <input id="weeks" inputmode="numeric" placeholder="9" />
+      </div>
 
-      <label>Активность</label>
-      <select id="act">
-        <option value="low">низкая</option>
-        <option value="medium" selected>средняя</option>
-        <option value="high">высокая</option>
-      </select>
+      <div class="field">
+        <label>Активность</label>
+        <select id="act">
+          <option value="low">низкая</option>
+          <option value="medium" selected>средняя</option>
+          <option value="high">высокая</option>
+        </select>
+      </div>
 
-      <label>Утренний чек-ин</label>
-      <input id="cin" placeholder="08:05" />
+      <div class="field">
+        <label>Утренний чек-ин</label>
+        <input id="cin" inputmode="numeric" placeholder="08:05" />
+      </div>
 
-      <label>Вечерний отчёт</label>
-      <input id="cout" placeholder="22:30" />
+      <div class="field">
+        <label>Вечерний отчёт</label>
+        <input id="cout" inputmode="numeric" placeholder="22:30" />
+      </div>
 
-      <button class="btn" id="save">✅ Подписать контракт</button>
-      <button class="btn2" id="back">← Назад</button>
+      <div class="actions">
+        <button class="btn" id="save">✅ Подписать контракт</button>
+        <button class="btn2" id="back">← Назад</button>
+      </div>
     </div>
 
     <!-- экран 2 -->
     <div class="card hidden" id="s2">
       <div class="h1">Сегодня</div>
+
       <div class="grid">
-        <div class="tile"><div class="k">Съедено</div><div class="v" id="eaten">—</div></div>
-        <div class="tile"><div class="k">Осталось</div><div class="v" id="left">—</div></div>
-        <div class="tile"><div class="k">Шаги</div><div class="v" id="steps">—</div></div>
+        <div class="tile">
+          <div class="k">Съедено</div>
+          <div class="v" id="eaten">—</div>
+        </div>
+
+        <div class="tile">
+          <div class="k">Осталось</div>
+          <div class="v" id="left">—</div>
+        </div>
+
+        <div class="tile span2">
+          <div class="k">Шаги</div>
+          <div class="v" id="steps">—</div>
+        </div>
       </div>
 
-      <button class="btn" id="meal">📸 Добавить еду</button>
-      <button class="btn2" id="wbtn">⚖️ Внести вес</button>
-      <button class="btn2" id="sbtn">🚶 Внести шаги</button>
+      <div class="actions">
+        <button class="btn" id="meal">📸 Добавить еду</button>
+        <button class="btn2" id="wbtn">⚖️ Внести вес</button>
+        <button class="btn2" id="sbtn">🚶 Внести шаги</button>
+      </div>
     </div>
   </div>
 
