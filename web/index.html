@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Бот Худей</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <video id="bg" autoplay muted loop playsinline>
+    <source src="./gipsy.mp4" type="video/mp4" />
+  </video>
+
+  <div class="wrap">
+    <!-- экран 0 -->
+    <div class="card" id="s0">
+      <div class="h1">БОТ ХУДЕЙ</div>
+      <div class="p">Старик уже рядом. Готов снять проклятие лишнего веса?</div>
+      <button class="btn" id="go">🔥 Снять проклятие</button>
+    </div>
+
+    <!-- экран 1 -->
+    <div class="card hidden" id="s1">
+      <div class="h1">Контракт</div>
+
+      <label>Вес (кг)</label>
+      <input id="w" inputmode="decimal" placeholder="105" />
+
+      <label>Рост (см)</label>
+      <input id="h" inputmode="numeric" placeholder="182" />
+
+      <label>Возраст</label>
+      <input id="a" inputmode="numeric" placeholder="44" />
+
+      <label>Цель (кг)</label>
+      <input id="gw" inputmode="decimal" placeholder="85" />
+
+      <label>Срок (недель)</label>
+      <input id="weeks" inputmode="numeric" placeholder="9" />
+
+      <label>Активность</label>
+      <select id="act">
+        <option value="low">низкая</option>
+        <option value="medium" selected>средняя</option>
+        <option value="high">высокая</option>
+      </select>
+
+      <label>Утренний чек-ин</label>
+      <input id="cin" placeholder="08:05" />
+
+      <label>Вечерний отчёт</label>
+      <input id="cout" placeholder="22:30" />
+
+      <button class="btn" id="save">✅ Подписать контракт</button>
+      <button class="btn2" id="back">← Назад</button>
+    </div>
+
+    <!-- экран 2 -->
+    <div class="card hidden" id="s2">
+      <div class="h1">Сегодня</div>
+      <div class="grid">
+        <div class="tile"><div class="k">Съедено</div><div class="v" id="eaten">—</div></div>
+        <div class="tile"><div class="k">Осталось</div><div class="v" id="left">—</div></div>
+        <div class="tile"><div class="k">Шаги</div><div class="v" id="steps">—</div></div>
+      </div>
+
+      <button class="btn" id="meal">📸 Добавить еду</button>
+      <button class="btn2" id="wbtn">⚖️ Внести вес</button>
+      <button class="btn2" id="sbtn">🚶 Внести шаги</button>
+    </div>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>
