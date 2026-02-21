@@ -76,34 +76,36 @@
       </div>
     </div>
 
-    <!-- экран 2 -->
-    <div class="card hidden" id="s2">
-      <div class="h1">Сегодня</div>
+    <!-- web/index.html — замени блок s2 на этот: -->
+<!-- экран 2 -->
+<div class="card hidden" id="s2">
+  <div class="h1">Сегодня</div>
 
-      <div class="grid">
-        <div class="tile">
-          <div class="k">Съедено</div>
-          <div class="v" id="eaten">—</div>
-        </div>
+  <div class="grid">
+    <div class="tile">
+      <div class="k">Съедено</div>
+      <div class="v" id="eaten">—</div>
+    </div>
 
-        <div class="tile">
-          <div class="k">Осталось</div>
-          <div class="v" id="left">—</div>
-        </div>
+    <div class="tile">
+      <div class="k">Осталось</div>
+      <div class="v" id="left">—</div>
+    </div>
 
-        <div class="tile span2">
-          <div class="k">Шаги</div>
-          <div class="v" id="steps">—</div>
-        </div>
-      </div>
-
-      <div class="actions">
-        <button class="btn" id="meal">📸 Добавить еду</button>
-        <button class="btn2" id="wbtn">⚖️ Внести вес</button>
-        <button class="btn2" id="sbtn">🚶 Внести шаги</button>
-      </div>
+    <div class="tile span2">
+      <div class="k">Шаги</div>
+      <div class="v" id="steps">—</div>
     </div>
   </div>
+
+  <div class="actions">
+    <button class="btn" id="meal">📸 Добавить еду</button>
+    <button class="btn2" id="wbtn">⚖️ Вес утром</button>
+    <button class="btn2" id="wbtn_evening">🌙 Вес вечером</button>
+    <button class="btn2" id="sbtn">🚶 Шаги</button>
+    <button class="btn2" id="history">📊 История веса</button>
+  </div>
+</div>
 
   <script src="./app.js"></script>
 </body>
