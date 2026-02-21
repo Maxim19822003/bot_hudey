@@ -276,11 +276,21 @@ def webhook():
     text = msg.get("text", "")
 
     # /start
-    if text == "/start":
-        tg_send(chat_id,
-                "🕯️ Старик коснулся плеча…\n— Худей.\n\nОткрывай мини-приложение: там контракт, цифры и контроль.",
-                reply_markup=open_app_kb())
-        return "OK", 200
+    def tg_send_photo(chat_id: int, photo_url: str, caption: str = ""):
+    payload = {"chat_id": chat_id, "photo": photo_url, "caption": caption}
+    requests.post(f"{TELEGRAM_API}/sendPhoto", json=payload, timeout=20)
+
+if text == "/start":
+    # картинка из твоего сервиса (Render), чтобы не хранить в Telegram file_id
+    photo_url = f"{PUBLIC_BASE_URL}/web/gipsy.jpg"
+
+    caption = "🕯️ Старик коснулся плеча…\n— Худей."
+    tg_send_photo(chat_id, photo_url, caption)
+
+    tg_send(chat_id,
+            "Открывай мини-приложение: там контракт, цифры и контроль.",
+            reply_markup=open_app_kb())
+    return "OK", 200
 
     # WebApp data
     if "web_app_data" in msg:
