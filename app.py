@@ -400,7 +400,8 @@ def upsert_user(ws_users, user_id, first_name, data):
     ]
     r = find_row_by_user(ws_users, user_id)
     if r:
-        ws_users.update(f"A{r}:M{r}", [row])
+        # FIX: named parameters для gspread 6.x
+        ws_users.update(range_name=f"A{r}:M{r}", values=[row])
         logger.info(f"Updated user {user_id} at row {r}")
     else:
         ws_users.append_row(row)
@@ -411,11 +412,26 @@ def state_set(ws_state, user_id, pending_action, last_prompt=""):
     now = iso_now()
     row = [user_id, pending_action, now, last_prompt]
     if r:
-        ws_state.update(f"A{r}:D{r}", [row])
+        # FIX: named parameters
+        ws_state.update(range_name=f"A{r}:D{r}", values=[row])
     else:
         ws_state.append_row(row)
 
 def state_get(ws_state, user_id):
+    """Получаем pending_action из state"""
+    r = find_row_by_user(ws_state, user_id)
+    if not r:
+        logger.debug(f"state_get: no row for user {user_id}")
+        return ""
+    vals = ws_state.row_values(r)
+    # Колонка B (index 1) = pending_action
+    if len(vals) > 1:
+        logger.debug(f"state_get: user {user_id}, action={vals[1]}, data={vals[3] if len(vals) > 3 else ''}")
+        return vals[1]  # Возвращаем pending_action, не last_prompt!
+    return ""
+
+def state_get_data(ws_state, user_id):
+    """Получаем last_prompt (JSON данные) из state"""
     r = find_row_by_user(ws_state, user_id)
     if not r:
         return ""
@@ -426,7 +442,8 @@ def state_clear(ws_state, user_id):
     r = find_row_by_user(ws_state, user_id)
     if not r:
         return
-    ws_state.update(f"B{r}:D{r}", [["", "", ""]])
+    # FIX: named parameters
+    ws_state.update(range_name=f"B{r}:D{r}", values=[[""]])
 
 def daily_find_or_create(ws_daily, user_id, day):
     try:
@@ -727,7 +744,7 @@ def webhook():
             # === Уточнения еды ===
             if data.startswith("food:"):
                 food_name = data.split(":", 1)[1]
-                pending_data = state_get(ws_state, user_id)
+                pending_data = state_get_data(ws_state, user_id)  # Используем state_get_data для JSON
                 
                 try:
                     temp_data = json.loads(pending_data) if pending_data else {}
@@ -753,7 +770,7 @@ def webhook():
             
             if data.startswith("sauce:"):
                 sauce_answer = data.split(":", 1)[1]
-                pending_data = state_get(ws_state, user_id)
+                pending_data = state_get_data(ws_state, user_id)
                 
                 try:
                     temp_data = json.loads(pending_data) if pending_data else {}
@@ -784,7 +801,7 @@ def webhook():
             
             if data.startswith("size:"):
                 size = data.split(":", 1)[1]
-                pending_data = state_get(ws_state, user_id)
+                pending_data = state_get_data(ws_state, user_id)
                 
                 try:
                     temp_data = json.loads(pending_data) if pending_data else {}
@@ -872,56 +889,62 @@ def webhook():
         # State-based handlers
         ws_state = get_worksheet("state")
         pending = state_get(ws_state, user_id)
+        logger.info(f"Message from {user_id}, pending state: '{pending}'")
 
         # meal photo — начало диалога уточнений
-        if "photo" in msg and pending == "meal":
-            ws_meals = get_worksheet("meals")
-            ws_state = get_worksheet("state")
-            
-            best = msg["photo"][-1]
-            file_id = best["file_id"]
-            photo_url = tg_get_file_url(file_id)
-            
-            food_name, confidence = recognize_food(photo_url)
-            
-            temp_data = {
-                "photo_url": photo_url,
-                "file_id": file_id,
-                "food_guess": food_name,
-                "confidence": confidence
-            }
-            
-            if confidence < 0.7:
-                state_set(ws_state, user_id, "food_type", json.dumps(temp_data))
-                tg_send(
-                    chat_id,
-                    "Не уверен, что на фото 🤔\nВыбери, что это:",
-                    reply_markup=make_food_kb("food_type")
-                )
-            else:
-                rule = get_food_questions(food_name)
-                if rule["ask_sauce"]:
-                    state_set(ws_state, user_id, "sauce", json.dumps(temp_data))
+        if "photo" in msg:
+            logger.info(f"Photo received from {user_id}, pending='{pending}'")
+            if pending == "meal":
+                ws_meals = get_worksheet("meals")
+                
+                best = msg["photo"][-1]
+                file_id = best["file_id"]
+                photo_url = tg_get_file_url(file_id)
+                
+                food_name, confidence = recognize_food(photo_url)
+                
+                temp_data = {
+                    "photo_url": photo_url,
+                    "file_id": file_id,
+                    "food_guess": food_name,
+                    "confidence": confidence
+                }
+                
+                if confidence < 0.7:
+                    state_set(ws_state, user_id, "food_type", json.dumps(temp_data))
                     tg_send(
                         chat_id,
-                        f"Похоже на *{food_name}* ✅\nБыл соус или майонез?",
-                        reply_markup=make_food_kb("sauce")
-                    )
-                elif rule["ask_size"]:
-                    state_set(ws_state, user_id, "size", json.dumps(temp_data))
-                    tg_send(
-                        chat_id,
-                        f"Похоже на *{food_name}* ✅\nКакой размер порции?",
-                        reply_markup=make_food_kb("size")
+                        "Не уверен, что на фото 🤔\nВыбери, что это:",
+                        reply_markup=make_food_kb("food_type")
                     )
                 else:
-                    ws_daily = get_worksheet("daily_log")
-                    ws_users = get_worksheet("users")
-                    kcal = calculate_kcal(food_name)
-                    finalize_meal(ws_meals, ws_daily, ws_users, user_id, chat_id, temp_data, kcal)
-                    state_clear(ws_state, user_id)
-            
-            return "OK", 200
+                    rule = get_food_questions(food_name)
+                    if rule["ask_sauce"]:
+                        state_set(ws_state, user_id, "sauce", json.dumps(temp_data))
+                        tg_send(
+                            chat_id,
+                            f"Похоже на *{food_name}* ✅\nБыл соус или майонез?",
+                            reply_markup=make_food_kb("sauce")
+                        )
+                    elif rule["ask_size"]:
+                        state_set(ws_state, user_id, "size", json.dumps(temp_data))
+                        tg_send(
+                            chat_id,
+                            f"Похоже на *{food_name}* ✅\nКакой размер порции?",
+                            reply_markup=make_food_kb("size")
+                        )
+                    else:
+                        ws_daily = get_worksheet("daily_log")
+                        ws_users = get_worksheet("users")
+                        kcal = calculate_kcal(food_name)
+                        finalize_meal(ws_meals, ws_daily, ws_users, user_id, chat_id, temp_data, kcal)
+                        state_clear(ws_state, user_id)
+                
+                return "OK", 200
+            else:
+                logger.warning(f"Photo received but pending='{pending}', not 'meal'")
+                tg_send(chat_id, "Открывай мини-приложение — там основной интерфейс.", reply_markup=open_app_kb())
+                return "OK", 200
 
         # meal text
         if text and pending == "meal":
