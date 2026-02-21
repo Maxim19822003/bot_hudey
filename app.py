@@ -37,7 +37,7 @@ def today_str():
 
 def tg_send(chat_id, text, reply_markup=None):
     try:
-        payload = {"chat_id": chat_id, "text": text}
+        payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
         if reply_markup:
             payload["reply_markup"] = reply_markup
         r = requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=20)
@@ -87,6 +87,132 @@ def open_app_kb():
 def cancel_kb():
     return {"inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "cancel"}]]}
 
+# ========= Food recognition & estimation =========
+
+FOOD_RULES = {
+    "хот-дог": {"ask_sauce": True, "ask_size": False, "base": 250, "sauce": 80},
+    "бургер": {"ask_sauce": True, "ask_size": True, "base": 400, "sauce": 100},
+    "салат": {"ask_sauce": True, "ask_size": False, "base": 200, "sauce": 150},
+    "пицца": {"ask_sauce": False, "ask_size": True, "base": 800, "sauce": 0},
+    "шаурма": {"ask_sauce": True, "ask_size": True, "base": 450, "sauce": 120},
+    "роллы": {"ask_sauce": True, "ask_size": True, "base": 300, "sauce": 50},
+    "яйцо": {"ask_sauce": False, "ask_size": False, "base": 80, "sauce": 0},
+    "неизвестно": {"ask_sauce": False, "ask_size": True, "base": 500, "sauce": 0},
+}
+
+SIZE_MULT = {"small": 0.8, "medium": 1.0, "large": 1.3}
+
+def recognize_food(photo_url):
+    """
+    TODO: заменить на реальный AI (Google Vision / GPT-4 Vision)
+    Пока возвращаем "неизвестно" с низкой уверенностью
+    """
+    return "неизвестно", 0.3
+
+def get_food_questions(food_name):
+    """Определяем, что спрашивать у пользователя"""
+    rule = FOOD_RULES.get(food_name, FOOD_RULES["неизвестно"])
+    return rule
+
+def calculate_kcal(food_name, size="medium", has_sauce=False, sauce_type=None):
+    """Считаем калории по правилам"""
+    rule = FOOD_RULES.get(food_name, FOOD_RULES["неизвестно"])
+    
+    base = rule["base"]
+    mult = SIZE_MULT.get(size, 1.0)
+    
+    kcal = int(base * mult)
+    
+    if has_sauce and rule["ask_sauce"]:
+        sauce_kcal = rule.get("sauce", 100)
+        if sauce_type == "майонез":
+            sauce_kcal = int(sauce_kcal * 1.3)
+        elif sauce_type == "кетчуп":
+            sauce_kcal = int(sauce_kcal * 0.8)
+        kcal += sauce_kcal
+    
+    return kcal
+
+def make_food_kb(step):
+    """Создаём клавиатуру для уточнений"""
+    if step == "food_type":
+        return {
+            "inline_keyboard": [
+                [{"text": "🌭 Хот-дог", "callback_data": "food:хот-дог"},
+                 {"text": "🍔 Бургер", "callback_data": "food:бургер"}],
+                [{"text": "🥗 Салат", "callback_data": "food:салат"},
+                 {"text": "🍕 Пицца", "callback_data": "food:пицца"}],
+                [{"text": "🌯 Шаурма", "callback_data": "food:шаурма"},
+                 {"text": "🍣 Роллы", "callback_data": "food:роллы"}],
+                [{"text": "🥚 Яйцо", "callback_data": "food:яйцо"},
+                 {"text": "❓ Другое", "callback_data": "food:неизвестно"}],
+            ]
+        }
+    elif step == "sauce":
+        return {
+            "inline_keyboard": [
+                [{"text": "✅ Был соус", "callback_data": "sauce:yes"}],
+                [{"text": "❌ Без соуса", "callback_data": "sauce:no"}],
+                [{"text": "🥄 Майонез", "callback_data": "sauce:майонез"},
+                 {"text": "🍅 Кетчуп", "callback_data": "sauce:кетчуп"}],
+            ]
+        }
+    elif step == "size":
+        return {
+            "inline_keyboard": [
+                [{"text": "🍽 Маленькая", "callback_data": "size:small"},
+                 {"text": "🍽🍽 Средняя", "callback_data": "size:medium"},
+                 {"text": "🍽🍽🍽 Большая", "callback_data": "size:large"}],
+            ]
+        }
+    return {"inline_keyboard": []}
+
+def finalize_meal(ws_meals, ws_daily, ws_users, user_id, chat_id, temp_data, kcal):
+    """Финальное сохранение еды и обновление статистики"""
+    food_name = temp_data.get("food_name", temp_data.get("food_guess", "неизвестно"))
+    photo_url = temp_data.get("photo_url", "")
+    file_id = temp_data.get("file_id", "")
+    size = temp_data.get("size", "medium")
+    has_sauce = temp_data.get("has_sauce", False)
+    sauce_type = temp_data.get("sauce_type", "")
+    
+    notes = f"{food_name}, {size}"
+    if has_sauce:
+        notes += f", соус: {sauce_type or 'да'}"
+    
+    ws_meals.append_row([
+        iso_now(),
+        user_id,
+        "photo",
+        "",
+        food_name,
+        file_id,
+        photo_url,
+        str(kcal),
+        "0.8",
+        size,
+        sauce_type if has_sauce else "",
+        notes
+    ])
+    
+    day = today_str()
+    targets = get_user_targets(ws_users, user_id) or {"kcal_target": 2100}
+    eaten = sum_today_kcal(ws_meals, user_id, day)
+    left = max(0, targets["kcal_target"] - eaten)
+    
+    row = daily_find_or_create(ws_daily, user_id, day)
+    daily_set(ws_daily, row, 9, str(eaten))
+    daily_set(ws_daily, row, 10, str(left))
+    
+    sauce_info = f" (с соусом)" if has_sauce else ""
+    tg_send(
+        chat_id,
+        f"Записал ✅ *{food_name}*{sauce_info} — ~{kcal} ккал\n\n"
+        f"Сегодня съедено: {eaten}\n"
+        f"Осталось: {left}",
+        reply_markup=open_app_kb()
+    )
+
 # ========= Cron / Reminders =========
 
 def run_checkin():
@@ -114,7 +240,6 @@ def run_checkin():
             
             current_time = user_now.strftime("%H:%M")
             
-            # Отправляем если время совпадает (±1 минута)
             current_minutes = int(current_time.split(":")[0]) * 60 + int(current_time.split(":")[1])
             checkin_minutes = int(checkin_time.split(":")[0]) * 60 + int(checkin_time.split(":")[1])
             
@@ -160,12 +285,10 @@ def run_checkout():
             
             current_time = user_now.strftime("%H:%M")
             
-            # Отправляем если время совпадает (±1 минута)
             current_minutes = int(current_time.split(":")[0]) * 60 + int(current_time.split(":")[1])
             checkout_minutes = int(checkout_time.split(":")[0]) * 60 + int(checkout_time.split(":")[1])
             
             if abs(current_minutes - checkout_minutes) <= 1:
-                # Получаем данные за сегодня
                 day = today_str()
                 daily_rows = ws_daily.get_all_values()
                 
@@ -297,7 +420,7 @@ def state_get(ws_state, user_id):
     if not r:
         return ""
     vals = ws_state.row_values(r)
-    return vals[1] if len(vals) > 1 else ""
+    return vals[3] if len(vals) > 3 else ""
 
 def state_clear(ws_state, user_id):
     r = find_row_by_user(ws_state, user_id)
@@ -344,7 +467,7 @@ def calc_kcal_target(weight_kg, height_cm, age, activity, goal_weeks):
         logger.error(f"calc_kcal_target error: {e}")
         return 2500, 2100, 9000
 
-# ========= Meals estimation (MVP) =========
+# ========= Meals estimation =========
 def estimate_text_kcal(text):
     t = (text or "").lower()
     kcal = 0
@@ -357,9 +480,6 @@ def estimate_text_kcal(text):
     if "сахар" in t:
         kcal += 30
     return kcal if kcal > 0 else 500
-
-def estimate_photo_kcal(_photo_url):
-    return 600
 
 # ========= Totals =========
 def sum_today_kcal(ws_meals, user_id, day):
@@ -588,17 +708,103 @@ def webhook():
             chat_id = q["message"]["chat"]["id"]
             user_id = str(q.get("from", {}).get("id", ""))
             data = q.get("data", "")
+            
+            ws_state = get_worksheet("state")
+            ws_meals = get_worksheet("meals")
+            ws_daily = get_worksheet("daily_log")
+            ws_users = get_worksheet("users")
 
             if data == "meal_prompt":
-                ws_state = get_worksheet("state")
                 state_set(ws_state, user_id, "meal", "Ждём фото или текст еды")
                 tg_send(chat_id, "Кидай фото еды 📸\nЕсли фото не получается — напиши текстом, что съел.", reply_markup=cancel_kb())
                 return "OK", 200
 
             if data == "cancel":
-                ws_state = get_worksheet("state")
                 state_clear(ws_state, user_id)
                 tg_send(chat_id, "Ок.", reply_markup=open_app_kb())
+                return "OK", 200
+            
+            # === Уточнения еды ===
+            if data.startswith("food:"):
+                food_name = data.split(":", 1)[1]
+                pending_data = state_get(ws_state, user_id)
+                
+                try:
+                    temp_data = json.loads(pending_data) if pending_data else {}
+                except:
+                    temp_data = {}
+                
+                temp_data["food_name"] = food_name
+                
+                rule = get_food_questions(food_name)
+                
+                if rule["ask_sauce"]:
+                    state_set(ws_state, user_id, "sauce", json.dumps(temp_data))
+                    tg_send(chat_id, f"*{food_name}* — понял ✅\nБыл соус или майонез?", reply_markup=make_food_kb("sauce"))
+                elif rule["ask_size"]:
+                    state_set(ws_state, user_id, "size", json.dumps(temp_data))
+                    tg_send(chat_id, f"*{food_name}* — понял ✅\nКакой размер порции?", reply_markup=make_food_kb("size"))
+                else:
+                    kcal = calculate_kcal(food_name)
+                    finalize_meal(ws_meals, ws_daily, ws_users, user_id, chat_id, temp_data, kcal)
+                    state_clear(ws_state, user_id)
+                
+                return "OK", 200
+            
+            if data.startswith("sauce:"):
+                sauce_answer = data.split(":", 1)[1]
+                pending_data = state_get(ws_state, user_id)
+                
+                try:
+                    temp_data = json.loads(pending_data) if pending_data else {}
+                except:
+                    tg_send(chat_id, "Ошибка, начни заново.", reply_markup=open_app_kb())
+                    state_clear(ws_state, user_id)
+                    return "OK", 200
+                
+                temp_data["has_sauce"] = sauce_answer not in ["no"]
+                temp_data["sauce_type"] = sauce_answer if sauce_answer not in ["yes", "no"] else None
+                
+                food_name = temp_data.get("food_name", temp_data.get("food_guess", "неизвестно"))
+                rule = get_food_questions(food_name)
+                
+                if rule["ask_size"]:
+                    state_set(ws_state, user_id, "size", json.dumps(temp_data))
+                    tg_send(chat_id, "Понял! А размер порции какой?", reply_markup=make_food_kb("size"))
+                else:
+                    kcal = calculate_kcal(
+                        food_name,
+                        has_sauce=temp_data.get("has_sauce", False),
+                        sauce_type=temp_data.get("sauce_type")
+                    )
+                    finalize_meal(ws_meals, ws_daily, ws_users, user_id, chat_id, temp_data, kcal)
+                    state_clear(ws_state, user_id)
+                
+                return "OK", 200
+            
+            if data.startswith("size:"):
+                size = data.split(":", 1)[1]
+                pending_data = state_get(ws_state, user_id)
+                
+                try:
+                    temp_data = json.loads(pending_data) if pending_data else {}
+                except:
+                    tg_send(chat_id, "Ошибка, начни заново.", reply_markup=open_app_kb())
+                    state_clear(ws_state, user_id)
+                    return "OK", 200
+                
+                temp_data["size"] = size
+                food_name = temp_data.get("food_name", temp_data.get("food_guess", "неизвестно"))
+                
+                kcal = calculate_kcal(
+                    food_name,
+                    size=size,
+                    has_sauce=temp_data.get("has_sauce", False),
+                    sauce_type=temp_data.get("sauce_type")
+                )
+                finalize_meal(ws_meals, ws_daily, ws_users, user_id, chat_id, temp_data, kcal)
+                state_clear(ws_state, user_id)
+                
                 return "OK", 200
 
             return "OK", 200
@@ -667,30 +873,54 @@ def webhook():
         ws_state = get_worksheet("state")
         pending = state_get(ws_state, user_id)
 
-        # meal photo
+        # meal photo — начало диалога уточнений
         if "photo" in msg and pending == "meal":
             ws_meals = get_worksheet("meals")
-            ws_daily = get_worksheet("daily_log")
-            ws_users = get_worksheet("users")
+            ws_state = get_worksheet("state")
             
             best = msg["photo"][-1]
             file_id = best["file_id"]
             photo_url = tg_get_file_url(file_id)
-            kcal = estimate_photo_kcal(photo_url)
-
-            ws_meals.append_row([iso_now(), user_id, "photo", "", "", file_id, photo_url, str(kcal), "0.35", "", "", "MVP"])
-            state_clear(ws_state, user_id)
-
-            day = today_str()
-            targets = get_user_targets(ws_users, user_id) or {"kcal_target": 2100}
-            eaten = sum_today_kcal(ws_meals, user_id, day)
-            left = max(0, targets["kcal_target"] - eaten)
-
-            row = daily_find_or_create(ws_daily, user_id, day)
-            daily_set(ws_daily, row, 9, str(eaten))
-            daily_set(ws_daily, row, 10, str(left))
-
-            tg_send(chat_id, f"Записал ✅ ~{kcal} ккал.\nСегодня съедено: {eaten}\nОсталось: {left}", reply_markup=open_app_kb())
+            
+            food_name, confidence = recognize_food(photo_url)
+            
+            temp_data = {
+                "photo_url": photo_url,
+                "file_id": file_id,
+                "food_guess": food_name,
+                "confidence": confidence
+            }
+            
+            if confidence < 0.7:
+                state_set(ws_state, user_id, "food_type", json.dumps(temp_data))
+                tg_send(
+                    chat_id,
+                    "Не уверен, что на фото 🤔\nВыбери, что это:",
+                    reply_markup=make_food_kb("food_type")
+                )
+            else:
+                rule = get_food_questions(food_name)
+                if rule["ask_sauce"]:
+                    state_set(ws_state, user_id, "sauce", json.dumps(temp_data))
+                    tg_send(
+                        chat_id,
+                        f"Похоже на *{food_name}* ✅\nБыл соус или майонез?",
+                        reply_markup=make_food_kb("sauce")
+                    )
+                elif rule["ask_size"]:
+                    state_set(ws_state, user_id, "size", json.dumps(temp_data))
+                    tg_send(
+                        chat_id,
+                        f"Похоже на *{food_name}* ✅\nКакой размер порции?",
+                        reply_markup=make_food_kb("size")
+                    )
+                else:
+                    ws_daily = get_worksheet("daily_log")
+                    ws_users = get_worksheet("users")
+                    kcal = calculate_kcal(food_name)
+                    finalize_meal(ws_meals, ws_daily, ws_users, user_id, chat_id, temp_data, kcal)
+                    state_clear(ws_state, user_id)
+            
             return "OK", 200
 
         # meal text
