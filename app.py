@@ -197,12 +197,15 @@ def finalize_meal(ws_meals, ws_daily, ws_users, user_id, chat_id, temp_data, kca
     
     day = today_str()
     targets = get_user_targets(ws_users, user_id) or {"kcal_target": 2100}
-    eaten = sum_today_kcal(ws_meals, user_id, day)
-    left = max(0, targets["kcal_target"] - eaten)
     
+    # Пересчитываем статистику с учётом шагов
     row = daily_find_or_create(ws_daily, user_id, day)
-    daily_set(ws_daily, row, 9, str(eaten))
-    daily_set(ws_daily, row, 10, str(left))
+    recalculate_daily_stats(ws_daily, ws_users, ws_meals, user_id, day, row)
+    
+    # Получаем обновлённые значения
+    values = get_daily_row_values(ws_daily, row)
+    eaten = values[8] if len(values) > 8 else "0"
+    left = values[9] if len(values) > 9 else "?"
     
     sauce_info = f" (с соусом)" if has_sauce else ""
     tg_send(
@@ -305,13 +308,17 @@ def run_checkout():
                         kcal_eaten = dr[8] if len(dr) > 8 else "0"
                         break
                 
-                left = kcal_target - int(float(kcal_eaten or 0))
+                # Учитываем калории от шагов
+                steps_int = int(steps) if steps else 0
+                kcal_from_steps = int(steps_int * 0.04)
+                total_budget = kcal_target + kcal_from_steps
+                left = total_budget - int(float(kcal_eaten or 0))
                 
                 msg = f"""🌙 Вечерний отчёт, {first_name}
 
 ⚖️ Вес: {morning} → {evening} кг
-🚶 Шаги: {steps}
-🍽 Съедено: {kcal_eaten} / {kcal_target} ккал
+🚶 Шаги: {steps} (+{kcal_from_steps} ккал)
+🍽 Съедено: {kcal_eaten} / {total_budget} ккал
 📊 Осталось: {left} ккал
 
 Старик доволен?"""
@@ -400,7 +407,6 @@ def upsert_user(ws_users, user_id, first_name, data):
     ]
     r = find_row_by_user(ws_users, user_id)
     if r:
-        # FIX: named parameters для gspread 6.x
         ws_users.update(range_name=f"A{r}:M{r}", values=[row])
         logger.info(f"Updated user {user_id} at row {r}")
     else:
@@ -412,7 +418,6 @@ def state_set(ws_state, user_id, pending_action, last_prompt=""):
     now = iso_now()
     row = [user_id, pending_action, now, last_prompt]
     if r:
-        # FIX: named parameters
         ws_state.update(range_name=f"A{r}:D{r}", values=[row])
     else:
         ws_state.append_row(row)
@@ -424,10 +429,9 @@ def state_get(ws_state, user_id):
         logger.debug(f"state_get: no row for user {user_id}")
         return ""
     vals = ws_state.row_values(r)
-    # Колонка B (index 1) = pending_action
     if len(vals) > 1:
-        logger.debug(f"state_get: user {user_id}, action={vals[1]}, data={vals[3] if len(vals) > 3 else ''}")
-        return vals[1]  # Возвращаем pending_action, не last_prompt!
+        logger.debug(f"state_get: user {user_id}, action={vals[1]}")
+        return vals[1]
     return ""
 
 def state_get_data(ws_state, user_id):
@@ -442,27 +446,119 @@ def state_clear(ws_state, user_id):
     r = find_row_by_user(ws_state, user_id)
     if not r:
         return
-    # FIX: named parameters
     ws_state.update(range_name=f"B{r}:D{r}", values=[[""]])
 
 def daily_find_or_create(ws_daily, user_id, day):
+    """Находит или создаёт строку для пользователя на конкретный день"""
     try:
         rows = ws_daily.get_all_values()
+        logger.info(f"daily_find_or_create: day={day}, user={user_id}, total_rows={len(rows)}")
+        
+        # Ищем существующую запись (начиная со строки 2, пропускаем заголовки)
         for i in range(1, len(rows)):
-            if len(rows[i]) >= 2 and rows[i][0] == day and rows[i][1] == str(user_id):
-                return i + 1
-        ws_daily.append_row([day, user_id, "", "", "", "", "", "", "", "", "", "", "", iso_now()])
-        return len(rows) + 1
+            row = rows[i]
+            
+            # Пропускаем пустые или слишком короткие строки
+            if len(row) < 2:
+                continue
+            
+            row_day = str(row[0]).strip() if row[0] else ""
+            row_user = str(row[1]).strip() if row[1] else ""
+            
+            if row_day == day and row_user == str(user_id):
+                logger.info(f"Found existing row {i+1}")
+                return i + 1  # 1-based index для gspread
+        
+        # Не нашли — создаём новую строку с полными данными
+        new_row = [
+            day,           # A - date (1)
+            str(user_id),  # B - user_id (2)
+            "",            # C - weight_morning_kg (3)
+            "",            # D - weight_evening_kg (4)
+            "",            # E - steps (5)
+            "",            # F - workout (6)
+            "",            # G - water_ml (7)
+            "",            # H - sleep_h (8)
+            "0",           # I - kcal_eaten (9) - инициализируем 0!
+            "",            # J - kcal_left (10)
+            "",            # K - mood (11)
+            "",            # L - untracked (12)
+            "",            # M - comment (13)
+            iso_now()      # N - updated_at (14)
+        ]
+        
+        ws_daily.append_row(new_row)
+        new_row_num = len(rows) + 1
+        logger.info(f"Created new row {new_row_num}")
+        return new_row_num
+        
     except Exception as e:
         logger.error(f"daily_find_or_create error: {e}")
         raise
 
 def daily_set(ws_daily, row, col, value):
+    """Безопасная запись в ячейку с обновлением updated_at"""
     try:
-        ws_daily.update_cell(row, col, value)
+        if not row or row < 1:
+            raise ValueError(f"Invalid row: {row}")
+        if not col or col < 1 or col > 14:
+            raise ValueError(f"Invalid col: {col} (must be 1-14)")
+        
+        logger.info(f"daily_set: row={row}, col={col}, value='{value}'")
+        
+        # Записываем значение
+        ws_daily.update_cell(row, col, str(value))
+        
+        # Обновляем updated_at (колонка 14 = N)
         ws_daily.update_cell(row, 14, iso_now())
+        
     except Exception as e:
-        logger.error(f"daily_set error: {e}")
+        logger.error(f"daily_set error: row={row}, col={col}, value={value}, error: {e}")
+        raise
+
+def get_daily_row_values(ws_daily, row):
+    """Получает значения строки с проверкой длины"""
+    try:
+        values = ws_daily.row_values(row)
+        # Дополняем до 14 колонок пустыми строками
+        while len(values) < 14:
+            values.append("")
+        return values
+    except Exception as e:
+        logger.error(f"get_daily_row_values error: row={row}, error: {e}")
+        return [""] * 14
+
+def recalculate_daily_stats(ws_daily, ws_users, ws_meals, user_id, day, row=None):
+    """Пересчитывает kcal_left с учётом шагов и съеденного"""
+    try:
+        if row is None:
+            row = daily_find_or_create(ws_daily, user_id, day)
+        
+        # Получаем текущие значения
+        values = get_daily_row_values(ws_daily, row)
+        
+        steps = int(values[4]) if values[4] else 0      # Колонка 5 (E) = steps
+        kcal_eaten = int(values[8]) if values[8] else 0  # Колонка 9 (I) = kcal_eaten
+        
+        # Получаем цель пользователя
+        targets = get_user_targets(ws_users, user_id) or {"kcal_target": 2100}
+        kcal_target = targets["kcal_target"]
+        
+        # Калории от шагов: 1000 шагов = 40 ккал
+        kcal_from_steps = int(steps * 0.04)
+        
+        # Общий бюджет = база + шаги
+        total_budget = kcal_target + kcal_from_steps
+        kcal_left = max(0, total_budget - kcal_eaten)
+        
+        logger.info(f"Recalculate: target={kcal_target}, steps={steps}, "
+                   f"from_steps={kcal_from_steps}, eaten={kcal_eaten}, left={kcal_left}")
+        
+        # Записываем kcal_left (колонка 10 = J)
+        daily_set(ws_daily, row, 10, str(kcal_left))
+        
+    except Exception as e:
+        logger.error(f"recalculate_daily_stats error: {e}")
         raise
 
 # ========= Math =========
@@ -579,24 +675,24 @@ def api_today():
 
         targets = get_user_targets(ws_users, user_id) or {"kcal_target": 2100}
         day = today_str()
-        eaten = sum_today_kcal(ws_meals, user_id, day)
-        left = max(0, targets["kcal_target"] - eaten)
-
+        
+        # Пересчитываем статистику
         row = daily_find_or_create(ws_daily, user_id, day)
-        vals = ws_daily.row_values(row)
-        steps = 0
-        if len(vals) > 4 and vals[4]:
-            try:
-                steps = int(vals[4])
-            except:
-                pass
+        recalculate_daily_stats(ws_daily, ws_users, ws_meals, user_id, day, row)
+        
+        # Получаем обновлённые значения
+        values = get_daily_row_values(ws_daily, row)
+        
+        kcal_eaten = int(values[8]) if values[8] else 0   # Колонка 9
+        kcal_left = int(values[9]) if values[9] else 0    # Колонка 10
+        steps = int(values[4]) if values[4] else 0        # Колонка 5
 
         return jsonify({
             "ok": True,
             "date": day,
             "kcal_target": targets["kcal_target"],
-            "kcal_eaten": eaten,
-            "kcal_left": left,
+            "kcal_eaten": kcal_eaten,
+            "kcal_left": kcal_left,
             "steps": steps
         })
     except Exception as e:
@@ -708,6 +804,30 @@ def api_profile_save():
         logger.error(f"api_profile_save error: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
 
+@app.route("/api/debug_daily", methods=["GET"])
+def api_debug_daily():
+    """Отладка структуры daily_log"""
+    try:
+        ws_daily = get_worksheet("daily_log")
+        rows = ws_daily.get_all_values()
+        
+        result = {
+            "total_rows": len(rows),
+            "headers": rows[0] if rows else [],
+            "first_3_data_rows": []
+        }
+        
+        for i, row in enumerate(rows[1:4], 2):
+            result["first_3_data_rows"].append({
+                "row_num": i,
+                "content": row,
+                "length": len(row)
+            })
+        
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 # ========= Telegram webhook =========
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -744,7 +864,7 @@ def webhook():
             # === Уточнения еды ===
             if data.startswith("food:"):
                 food_name = data.split(":", 1)[1]
-                pending_data = state_get_data(ws_state, user_id)  # Используем state_get_data для JSON
+                pending_data = state_get_data(ws_state, user_id)
                 
                 try:
                     temp_data = json.loads(pending_data) if pending_data else {}
@@ -849,40 +969,117 @@ def webhook():
         if "web_app_data" in msg:
             try:
                 payload = json.loads(msg["web_app_data"]["data"])
+                logger.info(f"WebApp data received: {payload}")
             except Exception as e:
                 logger.error(f"web_app_data parse error: {e}")
-                tg_send(chat_id, "Не понял данные из приложения.", reply_markup=open_app_kb())
+                tg_send(chat_id, "❌ Ошибка данных из приложения", reply_markup=open_app_kb())
                 return "OK", 200
 
             action = payload.get("action", "")
             
+            # === ВЕС УТРОМ (колонка 3) ===
             if action == "weight_morning":
-                ws_daily = get_worksheet("daily_log")
-                w = str(payload.get("weight_morning_kg", "")).strip()
-                day = today_str()
-                row = daily_find_or_create(ws_daily, user_id, day)
-                daily_set(ws_daily, row, 3, w)
-                tg_send(chat_id, f"Вес записал ✅ {w} кг", reply_markup=open_app_kb())
+                try:
+                    ws_daily = get_worksheet("daily_log")
+                    w = str(payload.get("weight_morning_kg", "")).strip().replace(",", ".")
+                    
+                    try:
+                        w_float = float(w)
+                        if w_float < 30 or w_float > 300:
+                            raise ValueError("Out of range")
+                    except ValueError:
+                        tg_send(chat_id, "❌ Введи вес от 30 до 300 кг", reply_markup=open_app_kb())
+                        return "OK", 200
+                    
+                    day = today_str()
+                    row = daily_find_or_create(ws_daily, user_id, day)
+                    daily_set(ws_daily, row, 3, str(w_float))
+                    
+                    tg_send(chat_id, f"Вес утром записан ✅ {w_float} кг", reply_markup=open_app_kb())
+                    
+                except Exception as e:
+                    logger.error(f"weight_morning error: {e}")
+                    tg_send(chat_id, "❌ Ошибка сохранения веса", reply_markup=open_app_kb())
+                
                 return "OK", 200
-
+            
+            # === ВЕС ВЕЧЕРОМ (колонка 4) ===
             if action == "weight_evening":
-                ws_daily = get_worksheet("daily_log")
-                w = str(payload.get("weight_evening_kg", "")).strip()
-                day = today_str()
-                row = daily_find_or_create(ws_daily, user_id, day)
-                daily_set(ws_daily, row, 4, w)
-                tg_send(chat_id, f"Вечерний вес записал ✅ {w} кг", reply_markup=open_app_kb())
+                try:
+                    ws_daily = get_worksheet("daily_log")
+                    w = str(payload.get("weight_evening_kg", "")).strip().replace(",", ".")
+                    
+                    try:
+                        w_float = float(w)
+                        if w_float < 30 or w_float > 300:
+                            raise ValueError("Out of range")
+                    except ValueError:
+                        tg_send(chat_id, "❌ Введи вес от 30 до 300 кг", reply_markup=open_app_kb())
+                        return "OK", 200
+                    
+                    day = today_str()
+                    row = daily_find_or_create(ws_daily, user_id, day)
+                    daily_set(ws_daily, row, 4, str(w_float))
+                    
+                    tg_send(chat_id, f"Вес вечером записан ✅ {w_float} кг", reply_markup=open_app_kb())
+                    
+                except Exception as e:
+                    logger.error(f"weight_evening error: {e}")
+                    tg_send(chat_id, "❌ Ошибка сохранения веса", reply_markup=open_app_kb())
+                
                 return "OK", 200
-
+            
+            # === ШАГИ (колонка 5) ===
             if action == "steps":
-                ws_daily = get_worksheet("daily_log")
-                s = str(payload.get("steps", "")).strip()
-                day = today_str()
-                row = daily_find_or_create(ws_daily, user_id, day)
-                daily_set(ws_daily, row, 5, s)
-                tg_send(chat_id, f"Шаги записал ✅ {s}", reply_markup=open_app_kb())
+                try:
+                    ws_daily = get_worksheet("daily_log")
+                    ws_users = get_worksheet("users")
+                    ws_meals = get_worksheet("meals")
+                    
+                    s = str(payload.get("steps", "")).strip()
+                    logger.info(f"Steps input: '{s}' from user {user_id}")
+                    
+                    # Валидация
+                    if not s:
+                        tg_send(chat_id, "❌ Введи количество шагов", reply_markup=open_app_kb())
+                        return "OK", 200
+                    
+                    try:
+                        steps_int = int(s)
+                        if steps_int < 0 or steps_int > 100000:
+                            raise ValueError("Out of range")
+                    except ValueError:
+                        tg_send(chat_id, "❌ Введи число шагов от 0 до 100000", reply_markup=open_app_kb())
+                        return "OK", 200
+                    
+                    day = today_str()
+                    
+                    # Находим или создаём строку
+                    row = daily_find_or_create(ws_daily, user_id, day)
+                    
+                    # Записываем шаги (колонка 5)
+                    daily_set(ws_daily, row, 5, str(steps_int))
+                    
+                    # Пересчитываем калории
+                    recalculate_daily_stats(ws_daily, ws_users, ws_meals, user_id, day, row)
+                    
+                    # Получаем обновлённые значения для ответа
+                    values = get_daily_row_values(ws_daily, row)
+                    kcal_left = values[9] if len(values) > 9 else "?"
+                    
+                    tg_send(
+                        chat_id, 
+                        f"Шаги записаны ✅ {steps_int:,} шагов\nОсталось калорий: {kcal_left}".replace(",", " "),
+                        reply_markup=open_app_kb()
+                    )
+                    
+                except Exception as e:
+                    logger.error(f"steps error: {e}")
+                    tg_send(chat_id, "❌ Ошибка сохранения шагов", reply_markup=open_app_kb())
+                
                 return "OK", 200
-
+            
+            # Неизвестное действие
             tg_send(chat_id, "Ок.", reply_markup=open_app_kb())
             return "OK", 200
 
@@ -957,13 +1154,15 @@ def webhook():
             state_clear(ws_state, user_id)
 
             day = today_str()
-            targets = get_user_targets(ws_users, user_id) or {"kcal_target": 2100}
-            eaten = sum_today_kcal(ws_meals, user_id, day)
-            left = max(0, targets["kcal_target"] - eaten)
-
+            
+            # Пересчитываем статистику
             row = daily_find_or_create(ws_daily, user_id, day)
-            daily_set(ws_daily, row, 9, str(eaten))
-            daily_set(ws_daily, row, 10, str(left))
+            recalculate_daily_stats(ws_daily, ws_users, ws_meals, user_id, day, row)
+            
+            # Получаем обновлённые значения
+            values = get_daily_row_values(ws_daily, row)
+            eaten = values[8] if len(values) > 8 else "0"
+            left = values[9] if len(values) > 9 else "?"
 
             tg_send(chat_id, f"Записал ✅ ~{kcal} ккал (оценка).\nСегодня съедено: {eaten}\nОсталось: {left}", reply_markup=open_app_kb())
             return "OK", 200
