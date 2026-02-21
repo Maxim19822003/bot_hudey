@@ -481,6 +481,15 @@ def webhook():
                 tg_send(chat_id, f"Вес записал ✅ {w} кг", reply_markup=open_app_kb())
                 return "OK", 200
 
+                    if action == "weight_evening":
+            ws_daily = get_worksheet("daily_log")
+            w = str(payload.get("weight_evening_kg", "")).strip()
+            day = today_str()
+            row = daily_find_or_create(ws_daily, user_id, day)
+            daily_set(ws_daily, row, 4, w)  # колонка D = weight_evening_kg
+            tg_send(chat_id, f"Вечерний вес записал ✅ {w} кг", reply_markup=open_app_kb())
+            return "OK", 200
+
             if action == "steps":
                 ws_daily = get_worksheet("daily_log")
                 s = str(payload.get("steps", "")).strip()
@@ -551,6 +560,45 @@ def webhook():
     except Exception as e:
         logger.error(f"webhook error: {e}")
         return "Error", 500
+
+@app.route("/api/weight_history", methods=["GET"])
+def api_weight_history():
+    try:
+        user_id = request.args.get("user_id", "").strip()
+        days = int(request.args.get("days", "30"))
+        
+        if not user_id:
+            return jsonify({"ok": False, "error": "user_id required"}), 400
+
+        ws_daily = get_worksheet("daily_log")
+        rows = ws_daily.get_all_values()
+        
+        data = []
+        for i in range(1, len(rows)):
+            r = rows[i]
+            if len(r) < 3:
+                continue
+            date_val = r[0]
+            uid = r[1]
+            if uid != str(user_id):
+                continue
+            
+            morning = r[2] if len(r) > 2 else ""
+            evening = r[3] if len(r) > 3 else ""
+            
+            data.append({
+                "date": date_val,
+                "morning": morning,
+                "evening": evening
+            })
+        
+        # Сортируем по дате, берём последние N дней
+        data = sorted(data, key=lambda x: x["date"], reverse=True)[:days]
+        
+        return jsonify({"ok": True, "data": data})
+    except Exception as e:
+        logger.error(f"api_weight_history error: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
