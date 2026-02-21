@@ -1,24 +1,164 @@
-html,body{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;background:#000}
-#bg{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;filter:brightness(.85) contrast(1.05)}
-.wrap{
-  position:fixed; inset:0;
-  display:flex;
-  align-items:flex-end;          /* вниз */
-  justify-content:center;
-  padding:16px 16px 56px 16px;   /* отступ снизу, чтобы было как “синяя стрелка” */
+html,body{
+  height:100%;
+  margin:0;
+  font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;
+  background:#000;
+  color:#fff;
 }
-.card{width:min(520px,94vw);background:rgba(0,0,0,.55);border:1px solid rgba(255,255,255,.12);
-  border-radius:18px;padding:16px;color:#fff;backdrop-filter:blur(10px)}
-.h1{font-size:26px;font-weight:800}
-.p{margin-top:8px;opacity:.9;line-height:1.3}
-label{display:block;margin-top:10px;opacity:.9;font-size:14px}
-input,select{width:100%;margin-top:6px;padding:12px;border-radius:12px;border:1px solid rgba(255,255,255,.16);
-  background:rgba(0,0,0,.35);color:#fff;outline:none}
-.btn,.btn2{width:100%;margin-top:12px;padding:14px;border-radius:14px;border:none;font-weight:800;font-size:16px}
-.btn{background:#ff2d2d;color:#fff}
-.btn2{background:rgba(255,255,255,.12);color:#fff}
+
+#bg{
+  position:fixed;
+  inset:0;
+  width:100%;
+  height:100%;
+  object-fit:cover;
+  filter:brightness(.78) contrast(1.06) saturate(1.02);
+}
+
+/* затемнение поверх видео (чтобы текст всегда читался) */
+body::before{
+  content:"";
+  position:fixed;
+  inset:0;
+  background:linear-gradient(
+    to bottom,
+    rgba(0,0,0,.35),
+    rgba(0,0,0,.55) 55%,
+    rgba(0,0,0,.70)
+  );
+  pointer-events:none;
+}
+
+.wrap{
+  position:fixed;
+  inset:0;
+  display:flex;
+  align-items:flex-end;
+  justify-content:center;
+
+  /* safe-area + запас снизу, чтобы карточка не “врезалась” */
+  padding:
+    max(16px, env(safe-area-inset-top))
+    16px
+    max(28px, env(safe-area-inset-bottom))
+    16px;
+
+  box-sizing:border-box;
+}
+
+.card{
+  width:min(520px, 94vw);
+  background:rgba(0,0,0,.56);
+  border:1px solid rgba(255,255,255,.12);
+  border-radius:18px;
+  padding:16px;
+  box-sizing:border-box;
+  backdrop-filter:blur(10px);
+
+  /* главное: чтобы не обрезало верх и было аккуратно на маленьких экранах */
+  max-height: calc(100vh - 160px);
+  overflow:auto;
+  -webkit-overflow-scrolling:touch;
+}
+
+.h1{
+  font-size:26px;
+  font-weight:900;
+  letter-spacing:.2px;
+}
+
+.p{
+  margin-top:8px;
+  opacity:.92;
+  line-height:1.35;
+}
+
+.field{
+  margin-top:12px;
+}
+
+label{
+  display:block;
+  margin:0 0 8px;
+  opacity:.92;
+  font-size:14px;
+}
+
+input,select{
+  width:100%;
+  box-sizing:border-box;
+
+  height:46px;               /* одинаковая высота */
+  padding:0 14px;            /* одинаковые отступы */
+  border-radius:14px;
+
+  border:1px solid rgba(255,255,255,.16);
+  background:rgba(0,0,0,.35);
+  color:#fff;
+  outline:none;
+}
+
+input::placeholder{
+  color:rgba(255,255,255,.45);
+}
+
+input:focus,select:focus{
+  border-color:rgba(255,255,255,.32);
+}
+
+.actions{
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+  margin-top:14px;
+}
+
+.btn,.btn2{
+  width:100%;
+  height:52px;
+  border-radius:16px;
+  border:none;
+  font-weight:900;
+  font-size:16px;
+}
+
+.btn{
+  background:#ff2d2d;
+  color:#fff;
+}
+
+.btn2{
+  background:rgba(255,255,255,.12);
+  color:#fff;
+}
+
 .hidden{display:none}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
-.tile{border:1px solid rgba(255,255,255,.12);border-radius:14px;padding:12px;background:rgba(0,0,0,.25)}
-.k{opacity:.85;font-size:13px}
-.v{font-size:22px;font-weight:900;margin-top:6px}
+
+.grid{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:10px;
+  margin-top:12px;
+}
+
+.tile{
+  border:1px solid rgba(255,255,255,.12);
+  border-radius:14px;
+  padding:12px;
+  background:rgba(0,0,0,.25);
+}
+
+.tile.span2{
+  grid-column:1 / -1;
+}
+
+.k{
+  opacity:.85;
+  font-size:13px;
+}
+
+.v{
+  font-size:22px;
+  font-weight:900;
+  margin-top:6px;
+}
