@@ -16,7 +16,9 @@ PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")  # https://x
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 app = Flask(__name__)
-
+def get_ws(sh, name: str):
+    return sh.worksheet(name)
+    
 # ========= Utils =========
 def iso_now():
     return datetime.now(timezone.utc).isoformat()
@@ -253,6 +255,71 @@ def api_today():
     })
 
 # ========= Telegram webhook =========
+@app.route("/api/profile_save", methods=["POST"])
+def api_profile_save():
+    data = request.get_json(force=True) or {}
+
+    user_id = str(data.get("user_id", "")).strip()
+    first_name = str(data.get("first_name", "")).strip() or "user"
+
+    if not user_id:
+        return jsonify({"ok": False, "error": "user_id required"}), 400
+
+    sh = get_sheet()
+    ws_users = sh.worksheet("users")
+
+    # читаем числа безопасно
+    def fnum(x, default=None):
+        try:
+            s = str(x).replace(",", ".").strip()
+            return float(s)
+        except Exception:
+            return default
+
+    def inum(x, default=None):
+        try:
+            return int(float(str(x).replace(",", ".").strip()))
+        except Exception:
+            return default
+
+    start_w = fnum(data.get("start_weight_kg"))
+    height = fnum(data.get("height_cm"))
+    age = inum(data.get("age"))
+    goal_w = fnum(data.get("goal_weight_kg"))
+    goal_weeks = fnum(data.get("goal_weeks"))
+
+    activity = (data.get("activity_level") or "medium").strip()
+    timezone_name = (data.get("timezone") or "Europe/Moscow").strip()
+    checkin_time = (data.get("checkin_time") or "08:05").strip()
+    checkout_time = (data.get("checkout_time") or "22:30").strip()
+
+    # если каких-то полей нет — всё равно сохраним что есть, чтобы не “молчало”
+    tdee, kcal_target, steps_target = 0, 2100, 9000
+    if start_w and height and age:
+        tdee, kcal_target, steps_target = calc_kcal_target(start_w, height, age, activity, goal_weeks)
+
+    payload = {
+        "timezone": timezone_name,
+        "created_at": iso_now(),
+        "height_cm": height or "",
+        "age": age or "",
+        "start_weight_kg": start_w or "",
+        "goal_weight_kg": goal_w or "",
+        "goal_deadline": f"{int(goal_weeks)} недель" if goal_weeks else "",
+        "activity_level": activity,
+        "kcal_target": kcal_target,
+        "checkin_time": checkin_time,
+        "checkout_time": checkout_time,
+    }
+
+    upsert_user(ws_users, user_id, first_name, payload)
+
+    return jsonify({
+        "ok": True,
+        "kcal_target": kcal_target,
+        "steps_target": steps_target
+    })
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     if WEBHOOK_SECRET and request.args.get("secret", "") != WEBHOOK_SECRET:
