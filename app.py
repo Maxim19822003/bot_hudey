@@ -1,7 +1,6 @@
-import os
-import json
-from datetime import datetime, timezone
-from flask import Flask, request
+import os, json
+from datetime import datetime, timezone, date
+from flask import Flask, request, send_from_directory, jsonify
 import requests
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -11,10 +10,43 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 SHEET_ID = os.environ["SHEET_ID"]
 GOOGLE_CREDS_JSON = os.environ["GOOGLE_CREDS_JSON"]
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")  # https://xxxx.onrender.com
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
-
 app = Flask(__name__)
+
+# ========= Utils =========
+def iso_now():
+    return datetime.now(timezone.utc).isoformat()
+
+def today_str():
+    return date.today().isoformat()
+
+def tg_send(chat_id: int, text: str, reply_markup=None):
+    payload = {"chat_id": chat_id, "text": text}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=20)
+
+def tg_answer_cb(cb_id: str):
+    requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={"callback_query_id": cb_id}, timeout=10)
+
+def tg_get_file_url(file_id: str) -> str:
+    r = requests.get(f"{TELEGRAM_API}/getFile", params={"file_id": file_id}, timeout=20).json()
+    file_path = r["result"]["file_path"]
+    return f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+
+def open_app_kb():
+    webapp_url = f"{PUBLIC_BASE_URL}/web/index.html"
+    return {
+        "inline_keyboard": [
+            [{"text": "🔥 Открыть мини-приложение", "web_app": {"url": webapp_url}}],
+            [{"text": "📸 Добавить еду (фото/текст)", "callback_data": "meal_prompt"}],
+        ]
+    }
+
+def cancel_kb():
+    return {"inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "cancel"}]]}
 
 # ========= Google Sheets =========
 def get_sheet():
@@ -27,93 +59,209 @@ def get_sheet():
     client = gspread.authorize(creds)
     return client.open_by_key(SHEET_ID)
 
-def ensure_headers(sh):
-    required = {
-        "users": ["user_id","first_name","timezone","created_at"],
-        "meals": ["ts","user_id","meal_type","text","photo_file_id","photo_url","kcal_avg","confidence","notes"],
-        "daily_log": ["date","user_id","weight_kg","steps","workout","water_ml","sleep_h","comment","updated_at"],
-    }
+# ========= Sheet helpers =========
+def find_row_by_user(ws, user_id: str) -> int | None:
+    col = ws.col_values(1)
+    try:
+        return col.index(user_id) + 1
+    except ValueError:
+        return None
 
-    existing_titles = [ws.title for ws in sh.worksheets()]
+def upsert_user(ws_users, user_id: str, first_name: str, data: dict):
+    # users headers (как ты уже создал):
+    # user_id, first_name, timezone, created_at, height_cm, age, start_weight_kg, goal_weight_kg,
+    # goal_deadline, activity_level, kcal_target, checkin_time, checkout_time
+    row = [
+        user_id,
+        first_name,
+        data.get("timezone", "Europe/Moscow"),
+        data.get("created_at", iso_now()),
+        str(data.get("height_cm", "")),
+        str(data.get("age", "")),
+        str(data.get("start_weight_kg", "")),
+        str(data.get("goal_weight_kg", "")),
+        str(data.get("goal_deadline", "")),
+        str(data.get("activity_level", "medium")),
+        str(data.get("kcal_target", "")),
+        str(data.get("checkin_time", "08:05")),
+        str(data.get("checkout_time", "22:30")),
+    ]
+    r = find_row_by_user(ws_users, user_id)
+    if r:
+        ws_users.update(f"A{r}:M{r}", [row])
+    else:
+        ws_users.append_row(row)
 
-    for title, headers in required.items():
-        if title not in existing_titles:
-            ws = sh.add_worksheet(title=title, rows=1000, cols=20)
-            ws.append_row(headers)
-        else:
-            ws = sh.worksheet(title)
-            if ws.row_values(1) != headers:
-                ws.delete_rows(1)
-                ws.insert_row(headers, 1)
+def state_set(ws_state, user_id: str, pending_action: str, last_prompt: str = ""):
+    # state: user_id, pending_action, pending_since, last_prompt
+    r = find_row_by_user(ws_state, user_id)
+    now = iso_now()
+    row = [user_id, pending_action, now, last_prompt]
+    if r:
+        ws_state.update(f"A{r}:D{r}", [row])
+    else:
+        ws_state.append_row(row)
 
-# ========= Telegram helpers =========
-def tg_send(chat_id: int, text: str, reply_markup=None):
-    payload = {"chat_id": chat_id, "text": text}
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    requests.post(f"{TELEGRAM_API}/sendMessage", json=payload)
+def state_get(ws_state, user_id: str) -> str:
+    r = find_row_by_user(ws_state, user_id)
+    if not r:
+        return ""
+    vals = ws_state.row_values(r)
+    return vals[1] if len(vals) > 1 else ""
 
-def tg_send_video(chat_id: int, caption: str, reply_markup=None):
-    with open("gipsy.mp4", "rb") as video:
-        files = {"video": video}
-        data = {"chat_id": chat_id, "caption": caption}
-        if reply_markup:
-            data["reply_markup"] = json.dumps(reply_markup)
-        requests.post(f"{TELEGRAM_API}/sendVideo", data=data, files=files)
+def state_clear(ws_state, user_id: str):
+    r = find_row_by_user(ws_state, user_id)
+    if not r:
+        return
+    ws_state.update(f"B{r}:D{r}", [["", "", ""]])
 
-def tg_get_file_url(file_id: str) -> str:
-    r = requests.get(f"{TELEGRAM_API}/getFile", params={"file_id": file_id}).json()
-    file_path = r["result"]["file_path"]
-    return f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+def daily_find_or_create(ws_daily, user_id: str, day: str) -> int:
+    rows = ws_daily.get_all_values()
+    for i in range(1, len(rows)):
+        if len(rows[i]) >= 2 and rows[i][0] == day and rows[i][1] == user_id:
+            return i + 1
+    ws_daily.append_row([day, user_id, "", "", "", "", "", "", "", "", "", "", "", iso_now()])
+    return len(rows) + 1
 
-def main_menu():
-    return {
-        "inline_keyboard": [
-            [{"text": "🔥 НАЧАТЬ", "callback_data": "begin"}],
-            [
-                {"text": "⚖️ Вес", "callback_data": "weight"},
-                {"text": "📸 Еда", "callback_data": "meal"}
-            ],
-            [
-                {"text": "🚶 Шаги", "callback_data": "steps"},
-                {"text": "📊 Итог дня", "callback_data": "summary"}
-            ]
-        ]
-    }
+def daily_set(ws_daily, row: int, col: int, value: str):
+    ws_daily.update_cell(row, col, value)
+    ws_daily.update_cell(row, 14, iso_now())  # updated_at
 
-# ========= Calorie Estimator =========
-def estimate_kcal_avg(photo_url: str):
-    return 600, 0.35, "MVP: без распознавания (заглушка)"
+# ========= Math (лимит калорий + шаги) =========
+def calc_kcal_target(weight_kg: float, height_cm: float, age: int, activity: str, goal_weeks: float | None):
+    # Mifflin-St Jeor для мужчин (как базовый по умолчанию).
+    # Если надо, потом добавим пол.
+    bmr = 10*weight_kg + 6.25*height_cm - 5*age + 5
+    mult = {"low": 1.2, "medium": 1.375, "high": 1.55}.get(activity, 1.375)
+    tdee = bmr * mult
 
-# ========= Routes =========
+    # дефицит: мягкий по умолчанию ~20% (и безопаснее, чем -2444 ккал/день)
+    deficit = tdee * 0.20
+    kcal_target = max(1500, int(tdee - deficit))  # нижнюю границу держим
+    steps_target = 9000 if activity != "high" else 11000
+
+    # можно чуть усилить при коротком сроке (но не ломаем)
+    if goal_weeks is not None and goal_weeks <= 10:
+        kcal_target = max(1500, int(tdee - tdee*0.25))
+
+    return int(tdee), int(kcal_target), int(steps_target)
+
+# ========= Meals estimation (MVP) =========
+def estimate_text_kcal(text: str) -> int:
+    # очень грубая оценка (MVP), чтобы сразу был “остаток”
+    t = text.lower()
+    kcal = 0
+    if "яйц" in t: kcal += 160
+    if "хлеб" in t: kcal += 120
+    if "печен" in t and "треск" in t: kcal += 480
+    if "сахар" in t: kcal += 30
+    # если ничего не нашли — ставим среднее
+    return kcal if kcal > 0 else 500
+
+def estimate_photo_kcal(_photo_url: str) -> int:
+    return 600
+
+# ========= Totals for today =========
+def sum_today_kcal(ws_meals, user_id: str, day: str) -> int:
+    rows = ws_meals.get_all_values()
+    # meals: ts,user_id,source,meal_type,text,photo_file_id,photo_url,kcal_avg,confidence,portion,sauce,notes
+    total = 0
+    for i in range(1, len(rows)):
+        r = rows[i]
+        if len(r) < 8:
+            continue
+        ts = r[0]
+        uid = r[1] if len(r) > 1 else ""
+        if uid != user_id:
+            continue
+        if ts[:10] != day:
+            continue
+        try:
+            total += int(float(r[7] or "0"))
+        except Exception:
+            pass
+    return total
+
+def get_user_targets(ws_users, user_id: str):
+    r = find_row_by_user(ws_users, user_id)
+    if not r:
+        return None
+    vals = ws_users.row_values(r)
+    # kcal_target column 11 (index 10)
+    kcal_target = int(float(vals[10])) if len(vals) > 10 and vals[10] else 2100
+    return {"kcal_target": kcal_target}
+
+# ========= Web routes (WebApp) =========
 @app.route("/", methods=["GET"])
 def health():
     return "OK", 200
 
+@app.route("/web/<path:filename>", methods=["GET"])
+def web_files(filename):
+    return send_from_directory("web", filename)
+
+# API для WebApp (сводка)
+@app.route("/api/today", methods=["GET"])
+def api_today():
+    user_id = request.args.get("user_id", "").strip()
+    if not user_id:
+        return jsonify({"ok": False, "error": "user_id required"}), 400
+
+    sh = get_sheet()
+    ws_users = sh.worksheet("users")
+    ws_meals = sh.worksheet("meals")
+    ws_daily = sh.worksheet("daily_log")
+
+    targets = get_user_targets(ws_users, user_id) or {"kcal_target": 2100}
+    day = today_str()
+    eaten = sum_today_kcal(ws_meals, user_id, day)
+    left = max(0, targets["kcal_target"] - eaten)
+
+    # шаги берём из daily_log если есть
+    row = daily_find_or_create(ws_daily, user_id, day)
+    vals = ws_daily.row_values(row)
+    steps = int(vals[4]) if len(vals) > 4 and vals[4] else 0
+
+    return jsonify({
+        "ok": True,
+        "date": day,
+        "kcal_target": targets["kcal_target"],
+        "kcal_eaten": eaten,
+        "kcal_left": left,
+        "steps": steps
+    })
+
+# ========= Telegram webhook =========
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    if WEBHOOK_SECRET:
-        if request.args.get("secret", "") != WEBHOOK_SECRET:
-            return "Forbidden", 403
+    if WEBHOOK_SECRET and request.args.get("secret", "") != WEBHOOK_SECRET:
+        return "Forbidden", 403
 
     update = request.get_json(force=True)
+    sh = get_sheet()
+    ws_users = sh.worksheet("users")
+    ws_meals = sh.worksheet("meals")
+    ws_daily = sh.worksheet("daily_log")
+    ws_state = sh.worksheet("state")
 
-    # Обработка кнопок
+    # callbacks
     if "callback_query" in update:
-        query = update["callback_query"]
-        chat_id = query["message"]["chat"]["id"]
-        data = query["data"]
+        q = update["callback_query"]
+        tg_answer_cb(q["id"])
+        chat_id = q["message"]["chat"]["id"]
+        user_id = str(q.get("from", {}).get("id", ""))
+        data = q.get("data", "")
 
-        if data == "begin":
-            tg_send(chat_id, "Сделка принята. Начинаем с цифр.\nПришли вес.")
-        elif data == "weight":
-            tg_send(chat_id, "Введи текущий вес (кг).")
-        elif data == "meal":
-            tg_send(chat_id, "Пришли фото еды.")
-        elif data == "steps":
-            tg_send(chat_id, "Сколько шагов сегодня?")
-        elif data == "summary":
-            tg_send(chat_id, "Итог дня скоро будет здесь.")
+        if data == "meal_prompt":
+            state_set(ws_state, user_id, "meal", "Ждём фото или текст еды")
+            tg_send(chat_id, "Кидай фото еды 📸\nЕсли фото не получается — напиши текстом, что съел.", reply_markup=cancel_kb())
+            return "OK", 200
+
+        if data == "cancel":
+            state_clear(ws_state, user_id)
+            tg_send(chat_id, "Ок.", reply_markup=open_app_kb())
+            return "OK", 200
+
         return "OK", 200
 
     msg = update.get("message")
@@ -121,53 +269,121 @@ def webhook():
         return "OK", 200
 
     chat_id = msg["chat"]["id"]
-    user = msg.get("from", {})
-    user_id = str(user.get("id", ""))
-    first_name = user.get("first_name", "")
-
-    sh = get_sheet()
-    ensure_headers(sh)
-    ws_users = sh.worksheet("users")
-    ws_meals = sh.worksheet("meals")
+    from_user = msg.get("from", {})
+    user_id = str(from_user.get("id", ""))
+    first_name = from_user.get("first_name", "")
 
     text = msg.get("text", "")
 
     # /start
     if text == "/start":
-        existing_ids = ws_users.col_values(1)
-        if user_id not in existing_ids:
-            ws_users.append_row([user_id, first_name, "Europe/Amsterdam", datetime.utcnow().isoformat()])
-
-        tg_send_video(
-            chat_id,
-            "БОТ ХУДЕЙ 🕯️\nСделка принята.\nДальше — цифры.",
-            reply_markup=main_menu()
-        )
+        tg_send(chat_id,
+                "🕯️ Старик коснулся плеча…\n— Худей.\n\nОткрывай мини-приложение: там контракт, цифры и контроль.",
+                reply_markup=open_app_kb())
         return "OK", 200
 
-    # Фото еды
-    if "photo" in msg:
+    # WebApp data
+    if "web_app_data" in msg:
+        try:
+            payload = json.loads(msg["web_app_data"]["data"])
+        except Exception:
+            tg_send(chat_id, "Не понял данные из приложения.", reply_markup=open_app_kb())
+            return "OK", 200
+
+        action = payload.get("action", "")
+        if action == "profile_save":
+            # посчитаем kcal_target сразу
+            try:
+                w = float(payload.get("start_weight_kg"))
+                h = float(payload.get("height_cm"))
+                a = int(payload.get("age"))
+                activity = payload.get("activity_level", "medium")
+                goal_weeks = payload.get("goal_weeks")
+                goal_weeks = float(goal_weeks) if goal_weeks not in (None, "", "null") else None
+                tdee, kcal_target, steps_target = calc_kcal_target(w, h, a, activity, goal_weeks)
+            except Exception:
+                tdee, kcal_target, steps_target = 0, 2100, 9000
+
+            payload["kcal_target"] = kcal_target
+            payload["created_at"] = iso_now()
+
+            upsert_user(ws_users, user_id, first_name, payload)
+
+            tg_send(chat_id,
+                    f"Контракт принят ✅\nЛимит на день: ~{kcal_target} ккал.\nШаги: цель ~{steps_target}.\n\nТеперь добавляй еду — фото или текст.",
+                    reply_markup=open_app_kb())
+            return "OK", 200
+
+        if action == "meal_request":
+            state_set(ws_state, user_id, "meal", "Ждём фото или текст еды")
+            tg_send(chat_id, "Кидай фото еды 📸\nЕсли фото не получается — напиши текстом, что съел.", reply_markup=cancel_kb())
+            return "OK", 200
+
+        if action == "weight_morning":
+            w = str(payload.get("weight_morning_kg", "")).strip()
+            day = today_str()
+            row = daily_find_or_create(ws_daily, user_id, day)
+            daily_set(ws_daily, row, 3, w)
+            tg_send(chat_id, f"Вес записал ✅ {w} кг", reply_markup=open_app_kb())
+            return "OK", 200
+
+        if action == "steps":
+            s = str(payload.get("steps", "")).strip()
+            day = today_str()
+            row = daily_find_or_create(ws_daily, user_id, day)
+            daily_set(ws_daily, row, 5, s)
+            tg_send(chat_id, f"Шаги записал ✅ {s}", reply_markup=open_app_kb())
+            return "OK", 200
+
+        tg_send(chat_id, "Ок.", reply_markup=open_app_kb())
+        return "OK", 200
+
+    pending = state_get(ws_state, user_id)
+
+    # meal photo
+    if "photo" in msg and pending == "meal":
         best = msg["photo"][-1]
         file_id = best["file_id"]
         photo_url = tg_get_file_url(file_id)
+        kcal = estimate_photo_kcal(photo_url)
 
-        kcal_avg, conf, notes = estimate_kcal_avg(photo_url)
-        ts = datetime.now(timezone.utc).isoformat()
+        # meals row
+        ws_meals.append_row([iso_now(), user_id, "photo", "", "", file_id, photo_url, str(kcal), "0.35", "", "", "MVP"])
+        state_clear(ws_state, user_id)
 
-        ws_meals.append_row([
-            ts, user_id, "", "", file_id, photo_url,
-            str(kcal_avg), str(conf), notes
-        ])
+        day = today_str()
+        targets = get_user_targets(ws_users, user_id) or {"kcal_target": 2100}
+        eaten = sum_today_kcal(ws_meals, user_id, day)
+        left = max(0, targets["kcal_target"] - eaten)
 
-        tg_send(chat_id, f"Записал ✅\nПо фото в среднем: ~{kcal_avg} ккал.", reply_markup=main_menu())
+        # записываем в daily_log totals
+        row = daily_find_or_create(ws_daily, user_id, day)
+        daily_set(ws_daily, row, 9, str(eaten))  # kcal_eaten col 9
+        daily_set(ws_daily, row, 10, str(left))  # kcal_left col 10
+
+        tg_send(chat_id, f"Записал ✅ ~{kcal} ккал.\nСегодня съедено: {eaten}\nОсталось: {left}", reply_markup=open_app_kb())
         return "OK", 200
 
-    # Вес (просто число)
-    if text and text.replace(".", "", 1).isdigit():
-        tg_send(chat_id, f"Вес {text} кг записан.", reply_markup=main_menu())
+    # meal text
+    if text and pending == "meal":
+        kcal = estimate_text_kcal(text)
+        ws_meals.append_row([iso_now(), user_id, "text", "", text, "", "", str(kcal), "0.25", "", "", "MVP: текст"])
+        state_clear(ws_state, user_id)
+
+        day = today_str()
+        targets = get_user_targets(ws_users, user_id) or {"kcal_target": 2100}
+        eaten = sum_today_kcal(ws_meals, user_id, day)
+        left = max(0, targets["kcal_target"] - eaten)
+
+        row = daily_find_or_create(ws_daily, user_id, day)
+        daily_set(ws_daily, row, 9, str(eaten))
+        daily_set(ws_daily, row, 10, str(left))
+
+        tg_send(chat_id, f"Записал ✅ ~{kcal} ккал (оценка).\nСегодня съедено: {eaten}\nОсталось: {left}", reply_markup=open_app_kb())
         return "OK", 200
 
-    tg_send(chat_id, "Выбери действие ниже.", reply_markup=main_menu())
+    # fallback
+    tg_send(chat_id, "Открывай мини-приложение — там основной интерфейс.", reply_markup=open_app_kb())
     return "OK", 200
 
 
