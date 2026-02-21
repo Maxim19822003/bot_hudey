@@ -83,7 +83,7 @@ document.getElementById("save").onclick = async () => {
     goal_weeks: valOrPlaceholder("weeks"),
     activity_level: document.getElementById("act").value,
     checkin_time: valOrPlaceholder("cin") || "08:05",
-    checkout_time: valOrPlaceholder("cout") or "22:30",
+    checkout_time: valOrPlaceholder("cout") || "22:30",
   };
 
   console.log("Sending profile_save:", payload);
