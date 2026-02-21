@@ -19,13 +19,14 @@ SHEET_ID = os.environ.get("SHEET_ID")
 GOOGLE_CREDS_JSON = os.environ.get("GOOGLE_CREDS_JSON")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+CRON_SECRET = os.environ.get("CRON_SECRET", "change_me")
 
 if not all([BOT_TOKEN, SHEET_ID, GOOGLE_CREDS_JSON]):
     raise ValueError("Missing required env vars: BOT_TOKEN, SHEET_ID, GOOGLE_CREDS_JSON")
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 app = Flask(__name__)
-CORS(app)  # Разрешаем запросы от WebApp
+CORS(app)
 
 # ========= Utils =========
 def iso_now():
@@ -86,9 +87,119 @@ def open_app_kb():
 def cancel_kb():
     return {"inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "cancel"}]]}
 
+# ========= Cron / Reminders =========
+
+def run_checkin():
+    """Утренний чек-ин: взвесься"""
+    logger.info("Running checkin reminder...")
+    try:
+        ws_users = get_worksheet("users")
+        rows = ws_users.get_all_values()
+        
+        for i in range(1, len(rows)):
+            r = rows[i]
+            if len(r) < 13:
+                continue
+            
+            user_id = r[0]
+            first_name = r[1] or "друг"
+            timezone_name = r[2] or "Europe/Moscow"
+            checkin_time = r[11] or "08:05"
+            
+            try:
+                from zoneinfo import ZoneInfo
+                user_now = datetime.now(ZoneInfo(timezone_name))
+            except:
+                user_now = datetime.now()
+            
+            current_time = user_now.strftime("%H:%M")
+            
+            # Отправляем если время совпадает (±1 минута)
+            current_minutes = int(current_time.split(":")[0]) * 60 + int(current_time.split(":")[1])
+            checkin_minutes = int(checkin_time.split(":")[0]) * 60 + int(checkin_time.split(":")[1])
+            
+            if abs(current_minutes - checkin_minutes) <= 1:
+                tg_send(
+                    user_id,
+                    f"🌅 Доброе утро, {first_name}! Время взвеситься.\n\nСтарик следит за тобой...",
+                    reply_markup=open_app_kb()
+                )
+                logger.info(f"Sent checkin to {user_id}")
+    except Exception as e:
+        logger.error(f"run_checkin error: {e}")
+
+def run_checkout():
+    """Вечерний отчёт"""
+    logger.info("Running checkout reminder...")
+    try:
+        ws_users = get_worksheet("users")
+        ws_daily = get_worksheet("daily_log")
+        rows = ws_users.get_all_values()
+        
+        for i in range(1, len(rows)):
+            r = rows[i]
+            if len(r) < 13:
+                continue
+            
+            user_id = r[0]
+            first_name = r[1] or "друг"
+            timezone_name = r[2] or "Europe/Moscow"
+            checkout_time = r[12] or "22:30"
+            kcal_target = 2100
+            if len(r) > 10 and r[10]:
+                try:
+                    kcal_target = int(float(r[10]))
+                except:
+                    pass
+            
+            try:
+                from zoneinfo import ZoneInfo
+                user_now = datetime.now(ZoneInfo(timezone_name))
+            except:
+                user_now = datetime.now()
+            
+            current_time = user_now.strftime("%H:%M")
+            
+            # Отправляем если время совпадает (±1 минута)
+            current_minutes = int(current_time.split(":")[0]) * 60 + int(current_time.split(":")[1])
+            checkout_minutes = int(checkout_time.split(":")[0]) * 60 + int(checkout_time.split(":")[1])
+            
+            if abs(current_minutes - checkout_minutes) <= 1:
+                # Получаем данные за сегодня
+                day = today_str()
+                daily_rows = ws_daily.get_all_values()
+                
+                morning = "?"
+                evening = "?"
+                steps = "0"
+                kcal_eaten = "0"
+                
+                for dr in daily_rows[1:]:
+                    if len(dr) >= 2 and dr[0] == day and dr[1] == user_id:
+                        morning = dr[2] if len(dr) > 2 else "?"
+                        evening = dr[3] if len(dr) > 3 else "?"
+                        steps = dr[4] if len(dr) > 4 else "0"
+                        kcal_eaten = dr[8] if len(dr) > 8 else "0"
+                        break
+                
+                left = kcal_target - int(float(kcal_eaten or 0))
+                
+                msg = f"""🌙 Вечерний отчёт, {first_name}
+
+⚖️ Вес: {morning} → {evening} кг
+🚶 Шаги: {steps}
+🍽 Съедено: {kcal_eaten} / {kcal_target} ккал
+📊 Осталось: {left} ккал
+
+Старик доволен?"""
+                
+                tg_send(user_id, msg, reply_markup=open_app_kb())
+                logger.info(f"Sent checkout to {user_id}")
+    except Exception as e:
+        logger.error(f"run_checkout error: {e}")
+
 # ========= Google Sheets =========
 _sheet_client = None
-_sheet_cache = {}
 
 def get_sheet():
     global _sheet_client
@@ -108,7 +219,7 @@ def get_sheet():
         raise
 
 def get_worksheet(name):
-    """Получает лист с кэшированием и созданием при необходимости"""
+    """Получает лист с созданием при необходимости"""
     try:
         sh = get_sheet()
         try:
@@ -116,7 +227,6 @@ def get_worksheet(name):
         except gspread.WorksheetNotFound:
             logger.warning(f"Worksheet '{name}' not found, creating...")
             ws = sh.add_worksheet(title=name, rows=1000, cols=20)
-            # Добавляем заголовки в зависимости от типа
             if name == "users":
                 ws.append_row(["user_id", "first_name", "timezone", "created_at",
                               "height_cm", "age", "start_weight_kg", "goal_weight_kg",
@@ -141,7 +251,7 @@ def get_worksheet(name):
 def find_row_by_user(ws, user_id):
     try:
         col = ws.col_values(1)
-        for i, val in enumerate(col[1:], start=2):  # skip header
+        for i, val in enumerate(col[1:], start=2):
             if val == str(user_id):
                 return i
         return None
@@ -197,13 +307,10 @@ def state_clear(ws_state, user_id):
 
 def daily_find_or_create(ws_daily, user_id, day):
     try:
-        # Ищем существующую запись
         rows = ws_daily.get_all_values()
         for i in range(1, len(rows)):
             if len(rows[i]) >= 2 and rows[i][0] == day and rows[i][1] == str(user_id):
                 return i + 1
-        
-        # Создаём новую
         ws_daily.append_row([day, user_id, "", "", "", "", "", "", "", "", "", "", "", iso_now()])
         return len(rows) + 1
     except Exception as e:
@@ -213,7 +320,7 @@ def daily_find_or_create(ws_daily, user_id, day):
 def daily_set(ws_daily, row, col, value):
     try:
         ws_daily.update_cell(row, col, value)
-        ws_daily.update_cell(row, 14, iso_now())  # updated_at
+        ws_daily.update_cell(row, 14, iso_now())
     except Exception as e:
         logger.error(f"daily_set error: {e}")
         raise
@@ -221,7 +328,6 @@ def daily_set(ws_daily, row, col, value):
 # ========= Math =========
 def calc_kcal_target(weight_kg, height_cm, age, activity, goal_weeks):
     try:
-        # Mifflin-St Jeor (муж)
         bmr = 10 * float(weight_kg) + 6.25 * float(height_cm) - 5 * float(age) + 5
         mult = {"low": 1.2, "medium": 1.375, "high": 1.55}.get(activity, 1.375)
         tdee = bmr * mult
@@ -236,7 +342,7 @@ def calc_kcal_target(weight_kg, height_cm, age, activity, goal_weeks):
         return int(tdee), int(kcal_target), int(steps_target)
     except Exception as e:
         logger.error(f"calc_kcal_target error: {e}")
-        return 2500, 2100, 9000  # fallback
+        return 2500, 2100, 9000
 
 # ========= Meals estimation (MVP) =========
 def estimate_text_kcal(text):
@@ -253,7 +359,6 @@ def estimate_text_kcal(text):
     return kcal if kcal > 0 else 500
 
 def estimate_photo_kcal(_photo_url):
-    # TODO: интеграция с AI
     return 600
 
 # ========= Totals =========
@@ -302,6 +407,24 @@ def get_user_targets(ws_users, user_id):
 def health():
     return "OK", 200
 
+@app.route("/trigger_reminder", methods=["GET", "POST"])
+def trigger_reminder():
+    """Endpoint для внешнего cron"""
+    secret = request.args.get("secret") or (request.json or {}).get("secret", "")
+    if secret != CRON_SECRET:
+        return "Forbidden", 403
+    
+    mode = request.args.get("mode") or (request.json or {}).get("mode", "checkin")
+    
+    if mode == "checkin":
+        run_checkin()
+    elif mode == "checkout":
+        run_checkout()
+    else:
+        return "Unknown mode", 400
+    
+    return "OK", 200
+
 @app.route("/web/<path:filename>", methods=["GET"])
 def web_files(filename):
     return send_from_directory("web", filename)
@@ -341,6 +464,44 @@ def api_today():
         })
     except Exception as e:
         logger.error(f"api_today error: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.route("/api/weight_history", methods=["GET"])
+def api_weight_history():
+    try:
+        user_id = request.args.get("user_id", "").strip()
+        days = int(request.args.get("days", "30"))
+        
+        if not user_id:
+            return jsonify({"ok": False, "error": "user_id required"}), 400
+
+        ws_daily = get_worksheet("daily_log")
+        rows = ws_daily.get_all_values()
+        
+        data = []
+        for i in range(1, len(rows)):
+            r = rows[i]
+            if len(r) < 3:
+                continue
+            date_val = r[0]
+            uid = r[1]
+            if uid != str(user_id):
+                continue
+            
+            morning = r[2] if len(r) > 2 else ""
+            evening = r[3] if len(r) > 3 else ""
+            
+            data.append({
+                "date": date_val,
+                "morning": morning,
+                "evening": evening
+            })
+        
+        data = sorted(data, key=lambda x: x["date"], reverse=True)[:days]
+        
+        return jsonify({"ok": True, "data": data})
+    except Exception as e:
+        logger.error(f"api_weight_history error: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 @app.route("/api/profile_save", methods=["POST"])
@@ -481,14 +642,14 @@ def webhook():
                 tg_send(chat_id, f"Вес записал ✅ {w} кг", reply_markup=open_app_kb())
                 return "OK", 200
 
-                    if action == "weight_evening":
-            ws_daily = get_worksheet("daily_log")
-            w = str(payload.get("weight_evening_kg", "")).strip()
-            day = today_str()
-            row = daily_find_or_create(ws_daily, user_id, day)
-            daily_set(ws_daily, row, 4, w)  # колонка D = weight_evening_kg
-            tg_send(chat_id, f"Вечерний вес записал ✅ {w} кг", reply_markup=open_app_kb())
-            return "OK", 200
+            if action == "weight_evening":
+                ws_daily = get_worksheet("daily_log")
+                w = str(payload.get("weight_evening_kg", "")).strip()
+                day = today_str()
+                row = daily_find_or_create(ws_daily, user_id, day)
+                daily_set(ws_daily, row, 4, w)
+                tg_send(chat_id, f"Вечерний вес записал ✅ {w} кг", reply_markup=open_app_kb())
+                return "OK", 200
 
             if action == "steps":
                 ws_daily = get_worksheet("daily_log")
@@ -560,45 +721,6 @@ def webhook():
     except Exception as e:
         logger.error(f"webhook error: {e}")
         return "Error", 500
-
-@app.route("/api/weight_history", methods=["GET"])
-def api_weight_history():
-    try:
-        user_id = request.args.get("user_id", "").strip()
-        days = int(request.args.get("days", "30"))
-        
-        if not user_id:
-            return jsonify({"ok": False, "error": "user_id required"}), 400
-
-        ws_daily = get_worksheet("daily_log")
-        rows = ws_daily.get_all_values()
-        
-        data = []
-        for i in range(1, len(rows)):
-            r = rows[i]
-            if len(r) < 3:
-                continue
-            date_val = r[0]
-            uid = r[1]
-            if uid != str(user_id):
-                continue
-            
-            morning = r[2] if len(r) > 2 else ""
-            evening = r[3] if len(r) > 3 else ""
-            
-            data.append({
-                "date": date_val,
-                "morning": morning,
-                "evening": evening
-            })
-        
-        # Сортируем по дате, берём последние N дней
-        data = sorted(data, key=lambda x: x["date"], reverse=True)[:days]
-        
-        return jsonify({"ok": True, "data": data})
-    except Exception as e:
-        logger.error(f"api_weight_history error: {e}")
-        return jsonify({"ok": False, "error": str(e)}), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
